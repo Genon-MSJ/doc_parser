@@ -14,6 +14,8 @@ from docling_core.types.doc import BoundingBox, DocItemLabel, DoclingDocument, P
 from docling.datamodel.pipeline_options import DataEnrichmentOptions
 from docling.prompts.prompt_manager import PromptManager
 from docling.utils import document_enrichment as de
+from facade.convert_processor import DocumentProcessor as ConvertProcessor
+from facade.intelligent_processor import DocumentProcessor as IntelligentProcessor
 from facade.parser_processor import DocumentProcessor
 from genon.preprocessor.processing.common import docling_ops as dops
 
@@ -77,3 +79,24 @@ def test_parse_docling_reocrs_only_on_needs_ocr(verdict, reocr_expected):
     with patch.object(core_parser, "judge_document", return_value=verdict):
         dp._parse_docling("doc.pdf")
     assert (dp._intel.load_documents.call_count, dp._intel.load_documents_with_docling_ocr.called) == (1, reocr_expected)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("facade_cls", [IntelligentProcessor, ConvertProcessor], ids=["intelligent", "convert"])
+@pytest.mark.parametrize("request_kwargs,reocr_expected", [
+    ({}, False),                   # yaml 기본 disable — 판정·재OCR 없음
+    ({"ocr_mode": "auto"}, True),  # 요청이 켜면 글리프 깨짐이 재OCR 사유가 된다
+], ids=["default-disable", "request-auto"])
+def test_http_facades_honor_request_ocr_mode(facade_cls, request_kwargs, reocr_expected):
+    """intelligent·convert 의 _load_document 도 요청 ocr_mode 가 yaml 을 덮는다(#482 리뷰 지적).
+    예전엔 self.ocr_mode 만 봐서 기본 disable 에서는 문서 단위로 켤 길이 없었다."""
+    fp = object.__new__(facade_cls)
+    fp.ocr_mode = "disable"
+    fp.enrichment_options = MagicMock()
+    fp.load_documents = MagicMock(return_value=MagicMock())
+    fp.load_documents_with_docling_ocr = MagicMock(return_value=MagicMock())
+    fp.check_glyphs = MagicMock(return_value=True)      # 글리프 깨짐 — auto 면 재OCR 사유
+    fp.check_empty_text = MagicMock(return_value=False)
+    with patch.object(sys.modules[facade_cls.__module__], "judge_document", return_value=de.OcrVerdict.UNKNOWN):
+        fp._load_document("scan.pdf", **request_kwargs)
+    assert fp.load_documents_with_docling_ocr.called is reocr_expected

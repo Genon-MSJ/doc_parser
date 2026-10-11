@@ -835,10 +835,12 @@ class DocumentProcessor(DoclingRuntimeBase):
         """ocr_mode 에 따라 docling 문서를 로딩한다.
         "force"=무조건 전체 OCR / "auto"=휴리스틱 기반 재OCR / "disable"=OCR 안 함
         """
-        if self.ocr_mode == "force":
+        # 요청 파라미터 ocr_mode 가 yaml 을 덮는다(#482: 기본 disable 을 문서 단위로 켠다). 인스턴스는 안 바꾼다.
+        ocr_mode = cp.resolve_ocr_mode(kwargs, self.ocr_mode)
+        if ocr_mode == "force":
             return self.load_documents_with_docling_ocr(file_path, **kwargs)
         document: DoclingDocument = self.load_documents(file_path, **kwargs)
-        if self.ocr_mode == "auto":
+        if ocr_mode == "auto":
             # #482: 판정 불가는 재OCR 사유가 아니다(processing/common/docling_ops.reocr_reason).
             verdict = judge_document(document, self.enrichment_options)
             reason = dops.reocr_reason(verdict, self.check_glyphs(document), self.check_empty_text(document))
@@ -855,7 +857,7 @@ class DocumentProcessor(DoclingRuntimeBase):
         ocr_table_cells: 글리프 깨진 테이블 셀 재OCR 수행 여부(xlsx 직접 처리는 False).
         """
         # 글리프 깨진 텍스트가 있는 테이블에 대해서만 OCR 수행 (청크토큰 8k이상 발생 방지)
-        if ocr_table_cells and self.ocr_mode != "disable" and self.ocr_endpoint:
+        if ocr_table_cells and cp.resolve_ocr_mode(kwargs, self.ocr_mode) != "disable" and self.ocr_endpoint:
             document = self.ocr_all_table_cells(document, file_path)
 
         output_path, output_file = os.path.split(file_path)
