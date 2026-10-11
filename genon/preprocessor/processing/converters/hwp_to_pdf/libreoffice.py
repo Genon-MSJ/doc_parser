@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import shutil
@@ -29,6 +30,9 @@ def _process_profile_dir() -> str:
     with _profile_lock:
         if _profile_dir is None or not os.path.isdir(_profile_dir):
             _profile_dir = tempfile.mkdtemp(prefix=f"soffice_profile_{os.getpid()}_")
+            # 프로세스가 정상 종료할 때 지운다. os._exit 로 죽는 워커 재기동은 못 지우므로 이름에
+            # pid 를 넣어 두어 잔여 폴더를 운영에서 구분할 수 있게 한다.
+            atexit.register(shutil.rmtree, _profile_dir, ignore_errors=True)
         return _profile_dir
 
 

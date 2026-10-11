@@ -138,6 +138,30 @@ def test_setup_logging_restores_disable():
         logging.disable(saved[1]); logging.root.setLevel(saved[0]); logging.root.handlers[:] = saved[2]
 
 
+@pytest.mark.unit
+def test_cli_log_level_applies_at_process_startup(tmp_path: Path):
+    """요청 log_level 을 core 가 무시하게 되면서 CLI 의 --log-level 이 죽었던 것(리뷰 지적) — CLI 는
+    프로세스에 직접 적용한다. 프로세서는 가짜(기동·처리 없음)."""
+    from processing.core import cli as core_cli
+
+    seen = {}
+
+    class _Fake:
+        def __init__(self, config_path=None):
+            pass
+
+        def setup_logging(self, level_num):
+            seen["level"] = level_num
+
+        async def __call__(self, request, file_path, **kwargs):
+            seen["kwargs"] = kwargs
+            return {"elements": []}
+
+    out = tmp_path / "o.json"
+    assert core_cli.run_cli(_Fake, [str(tmp_path / "a.txt"), "--log-level", "0", "-o", str(out)]) == 0
+    assert (seen["level"], seen["kwargs"].get("log_level")) == (0, 0)
+
+
 # ─── R4 page_batch_size: 전역이 아니라 파이프라인 옵션 ─────────────────────────
 
 @pytest.mark.unit
