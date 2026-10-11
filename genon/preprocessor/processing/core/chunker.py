@@ -421,7 +421,8 @@ class ChunkerCore:
         )
 
     def split_documents(self, documents: DoclingDocument, **kwargs: dict) -> List[DocChunk]:
-        """옛 입구(intelligent·convert·attachment 파사드용). 분할 결과의 문서 단위 값을 인스턴스에 붙인다.
+        """옛 입구(직접 호출부·테스트용 — HTTP 파사드 intelligent·convert·attachment 는 ChunkerCore 를 상속하지 않고
+        자기 사본을 갖는다). 분할 결과의 문서 단위 값을 인스턴스에 붙인다.
 
         공유 인스턴스를 요청마다 덮어쓰므로 동시 요청에 안전하지 않다. core 의 새 흐름
         (`split_document(job)`)은 `_split_documents_ex` 로 받아 `job.notes["split"]` 에 둔다(#481 F-B).
@@ -482,7 +483,7 @@ class ChunkerCore:
 
     async def compose_vectors(self, document: DoclingDocument, chunks: List[DocChunk], file_path: str, request: Request, converted_pdf_path: Optional[str] = None, **kwargs: dict) -> \
             list[dict]:
-        """옛 호출부용 입구. job 을 만들어 chunks_to_vector_metas 로 넘긴다."""
+        """옛 입구(직접 호출부·테스트용). job 을 만들어 chunks_to_vector_metas 로 넘긴다."""
         job = jb.ChunkJob(request=request, file_path=file_path, kind="docling", data=document,
                           document=document, doc_type=kwargs.get("doc_type"), params=kwargs)
         # 옛 파사드는 split_documents 가 인스턴스에 남긴 값을 쓴다 — 새 흐름과 같은 자리로 옮겨 둔다.
@@ -818,7 +819,8 @@ class ChunkerCore:
         # setdefault 로 전달할 수 없어 양쪽이 같은 resolver 를 호출한다.
         _include_header: bool = _resolve_include_chunk_header(kwargs, self._include_chunk_header)
         # 표 표기형태별 변형 텍스트 기록부(청커가 남긴다). off 면 None 이라 필드가 아예 생기지 않는다.
-        split = job.notes["split"]
+        # split 을 오버라이드해 문서 청크를 직접 만든 파사드는 split_document 를 안 거쳐 notes["split"] 이 없다.
+        split = job.notes.get("split") or SplitInfo(page_chunk_counts=defaultdict(int), table_split_totals={})
         _table_variants = split.table_variants
         if _table_variants is not None and not _table_variants.enabled():
             _table_variants = None

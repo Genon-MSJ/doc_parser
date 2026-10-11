@@ -52,6 +52,9 @@ from docling.utils.utils import chunkify
 
 _log = logging.getLogger(__name__)
 
+# __init__ 을 우회한 인스턴스(테스트)용 공용 락 — 호출마다 새 락을 만들면 아무것도 막지 못한다.
+_PIPELINE_INIT_FALLBACK_LOCK = threading.Lock()
+
 # CUSTOM IMPORT
 from docling.backend.json.bok_json_backend import BOKJsonDocumentBackend
 # genos_msword_backend 추가
@@ -361,7 +364,7 @@ class DocumentConverter:
         cache_key = (pipeline_class, options_hash)
 
         if cache_key not in self.initialized_pipelines:
-            with getattr(self, "_pipeline_init_lock", None) or threading.Lock():
+            with getattr(self, "_pipeline_init_lock", None) or _PIPELINE_INIT_FALLBACK_LOCK:
                 if cache_key not in self.initialized_pipelines:
                     _log.info(
                         f"Initializing pipeline for {pipeline_class.__name__} with options hash {options_hash}"

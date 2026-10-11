@@ -79,7 +79,7 @@ class LibreOfficeConverter:
             for cand in candidates:
                 cmd = [
                     "soffice", "--headless",
-                    f"-env:UserInstallation=file://{_process_profile_dir()}",
+                    f"-env:UserInstallation={Path(_process_profile_dir()).as_uri()}",
                     "--convert-to", convert_arg,
                     "--outdir", str(out_dir),
                     str(cand),

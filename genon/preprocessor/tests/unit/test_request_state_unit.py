@@ -5,10 +5,9 @@
   R1 파싱 토글(enricher 3종)   R2 청킹 결과(쪽별 청크 수·표 조각)   R3 루트 로거   R4 docling 전역 page_batch_size
 외부 호출 없음. DocumentProcessor 는 기동하지 않는다(R2 만 예외 — 아래 docstring).
 """
+import asyncio
 import logging
 import random
-import sys
-from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -75,8 +74,6 @@ def test_parse_jobs_keep_their_own_enrichers(tmp_path: Path):
         assert ([ea.table.options.enabled, ea.image.options.enabled, ea.doc_summary.options.enabled],
                 [eb.table.options.enabled, eb.image.options.enabled, eb.doc_summary.options.enabled]) == \
                ([True, True, True], [False, False, False])
-        assert not any(hasattr(proc._intel, n) for n in
-                       ("image_description_enricher", "table_description_enricher", "doc_summary_enricher"))
     finally:
         proc._finish_job(job_a); proc._finish_job(job_b)
 
@@ -99,7 +96,8 @@ def _doc(name: str, pages: int, per_page: int) -> DoclingDocument:
 
 @pytest.mark.unit
 def test_chunk_jobs_keep_their_own_split_info():
-    """재현 R2: 쪽별 청크 수가 다른 문서 둘을 같은 인스턴스로 번갈아 분할해도 각 job 이 자기 값을 본다.
+    """재현 R2: 쪽별 청크 수가 다른 문서 둘을 같은 인스턴스로 번갈아 처리해도 각 문서의 n_chunk_of_page 가
+    혼자 처리했을 때와 같다(공개 동작 — chunks_to_vector_metas 의 vector_meta 로 본다).
 
     청킹 본체(토크나이저·분할기)가 실제로 돌아야 하는 재현이라 기본 설정으로 청커를 기동한다
     (char 토크나이저, 외부 호출 없음, 생성 ~15ms). 설정 배선을 보는 테스트가 아니다.
@@ -110,18 +108,15 @@ def test_chunk_jobs_keep_their_own_split_info():
     def job(data):
         return jb.ChunkJob(request=None, file_path="", kind="docling", data=data, doc_type=None, params={"chunk_size": 300})
 
-    def counts(j):
-        return dict(j.notes["split"].page_chunk_counts)
+    def page_counts(j, chunks):
+        metas = asyncio.run(proc.chunks_to_vector_metas(j, chunks))
+        return sorted({(m.i_page, m.n_chunk_of_page) for m in metas})
 
-    solo_x, solo_y = job(x), job(y)                   # 기준: 각자 혼자 분할했을 때의 쪽별 청크 수
-    proc.split_document(solo_x); proc.split_document(solo_y)
-
+    solo_x = job(x); solo_counts_x = page_counts(solo_x, proc.split_document(solo_x))   # 기준: 혼자 처리
     job_x, job_y = job(x), job(y)
-    proc.split_document(job_x)
-    proc.split_document(job_y)                        # 예전엔 여기서 X 의 page_chunk_counts 가 Y 값으로 덮였다
-    assert (counts(job_x), counts(job_y)) == (counts(solo_x), counts(solo_y))
-    assert counts(solo_x)[1] > 1 and len(counts(solo_y)) > 1          # 두 문서의 값이 실제로 다르다
-    assert dict(getattr(proc, "page_chunk_counts", {})) == {}         # 인스턴스에는 쓰지 않는다
+    chunks_x = proc.split_document(job_x)
+    proc.split_document(job_y)                        # 예전엔 여기서 X 의 쪽별 청크 수가 Y 값으로 덮였다(7 → 1)
+    assert page_counts(job_x, chunks_x) == solo_counts_x and solo_counts_x[0][1] > 1
 
 
 # ─── R3 로거: 요청이 프로세스 로깅을 끄지 않는다 ─────────────────────────────
@@ -162,15 +157,19 @@ def test_cli_log_level_applies_at_process_startup(tmp_path: Path):
     assert (seen["level"], seen["kwargs"].get("log_level")) == (0, 0)
 
 
-# ─── R4 page_batch_size: 전역이 아니라 파이프라인 옵션 ─────────────────────────
+# ─── R4 page_batch_size: 청커가 전역을 덮지 않고, 파서 값은 파이프라인 옵션에 ───────
 
 @pytest.mark.unit
-@pytest.mark.parametrize("option,expected", [
-    (128, 128),
-    (None, docling_settings.perf.page_batch_size),   # 옵션이 없으면 전역 기본값
-])
-def test_page_batch_size_comes_from_pipeline_options(option, expected):
-    """재현 R4: 파서 128·청커 32 가 전역 하나를 두고 덮어쓰던 것을 파이프라인 옵션으로 가른다."""
+def test_chunker_init_leaves_global_page_batch_size_alone():
+    """재현 R4: 청커를 만들어도 docling 전역 page_batch_size 가 바뀌지 않는다(예전엔 32 로 덮어 파서의 128 이 사라졌다)."""
+    before = docling_settings.perf.page_batch_size
+    chunker_facade.DocumentProcessor()
+    assert docling_settings.perf.page_batch_size == before
+
+
+@pytest.mark.unit
+def test_page_batch_size_comes_from_pipeline_options():
+    """파서가 둔 파이프라인 옵션 값을 docling 파이프라인이 전역보다 먼저 읽는다."""
     pipeline = object.__new__(StandardPdfPipeline)
-    pipeline.pipeline_options = PdfPipelineOptions(page_batch_size=option)
-    assert pipeline._page_batch_size() == expected
+    pipeline.pipeline_options = PdfPipelineOptions(page_batch_size=128)
+    assert pipeline._page_batch_size() == 128

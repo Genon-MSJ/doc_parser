@@ -191,11 +191,9 @@ class TableTextDescriptionEnricher:
         self._cfg_cache: dict[str, dict] = {}
         self._options_cache: dict[str, TableTextDescriptionOptions] = {}
         self._runners: dict[str, Any] = {}
+        # runner(LLM 실행기)는 첫 요청 때 만들되 락 안에서(#481 F-F) — 같은 doc_type 요청 둘이 동시에
+        # 처음 들어와도 하나만 만든다. 설정·옵션 캐시는 값이 같아 중복 생성돼도 무해하므로 그대로 둔다.
         self._runners_lock = threading.Lock()
-        # 설정·옵션은 키가 기동 때 다 보이므로 미리 채운다(#481 F-F). runner(LLM 실행기)는 첫 요청 때
-        # 만들되 락 안에서 — 같은 doc_type 요청 둘이 동시에 처음 들어와도 하나만 만든다.
-        for key in ("", *self._overrides):
-            self.options_for(key)
 
     @property
     def options(self) -> TableTextDescriptionOptions:
