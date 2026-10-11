@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unicodedata
 from pathlib import Path
 from typing import ClassVar
@@ -15,6 +16,20 @@ from .base import BackendName
 _log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SEC = 600
+
+# soffice 는 사용자 프로필 폴더에 락을 잡는다. 같은 파드의 프로세스들이 기본 프로필을 공유하면 동시 변환이
+# 서로를 막거나 실패하므로 프로세스마다 프로필 하나를 둔다(#481 F-G). 호출마다 새로 만들면 매번 프로필
+# 초기화(수 초)를 치르므로 프로세스당 한 번만 만든다.
+_profile_lock = threading.Lock()
+_profile_dir: str | None = None
+
+
+def _process_profile_dir() -> str:
+    global _profile_dir
+    with _profile_lock:
+        if _profile_dir is None or not os.path.isdir(_profile_dir):
+            _profile_dir = tempfile.mkdtemp(prefix=f"soffice_profile_{os.getpid()}_")
+        return _profile_dir
 
 
 def _convert_arg_for(ext: str) -> str:
@@ -60,6 +75,7 @@ class LibreOfficeConverter:
             for cand in candidates:
                 cmd = [
                     "soffice", "--headless",
+                    f"-env:UserInstallation=file://{_process_profile_dir()}",
                     "--convert-to", convert_arg,
                     "--outdir", str(out_dir),
                     str(cand),

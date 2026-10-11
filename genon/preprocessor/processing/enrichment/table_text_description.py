@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import threading
 import re
 from dataclasses import replace
 from typing import Any, Callable, Optional
@@ -190,6 +191,11 @@ class TableTextDescriptionEnricher:
         self._cfg_cache: dict[str, dict] = {}
         self._options_cache: dict[str, TableTextDescriptionOptions] = {}
         self._runners: dict[str, Any] = {}
+        self._runners_lock = threading.Lock()
+        # 설정·옵션은 키가 기동 때 다 보이므로 미리 채운다(#481 F-F). runner(LLM 실행기)는 첫 요청 때
+        # 만들되 락 안에서 — 같은 doc_type 요청 둘이 동시에 처음 들어와도 하나만 만든다.
+        for key in ("", *self._overrides):
+            self.options_for(key)
 
     @property
     def options(self) -> TableTextDescriptionOptions:
@@ -276,6 +282,12 @@ class TableTextDescriptionEnricher:
         key = doc_type if doc_type in self._overrides else ""
         if key in self._runners:
             return self._runners[key]
+        with self._runners_lock:
+            if key in self._runners:
+                return self._runners[key]
+            return self._build_runner(key)
+
+    def _build_runner(self, key: str):
         from .custom_fields_enricher import CustomFieldsEnricher
 
         cfg = self.config_for(key)
