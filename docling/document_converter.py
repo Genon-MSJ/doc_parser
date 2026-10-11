@@ -1,4 +1,5 @@
 import hashlib
+import threading
 import logging
 import sys
 import time
@@ -238,6 +239,8 @@ class DocumentConverter:
         self.initialized_pipelines: Dict[
             Tuple[Type[BasePipeline], str], BasePipeline
         ] = {}
+        # 첫 변환을 두 스레드가 동시에 시작하면 파이프라인(모델 로딩)을 두 번 만든다 — 생성은 락 안에서(genon #481).
+        self._pipeline_init_lock = threading.Lock()
 
     def _get_initialized_pipelines(
         self,
@@ -358,12 +361,14 @@ class DocumentConverter:
         cache_key = (pipeline_class, options_hash)
 
         if cache_key not in self.initialized_pipelines:
-            _log.info(
-                f"Initializing pipeline for {pipeline_class.__name__} with options hash {options_hash}"
-            )
-            self.initialized_pipelines[cache_key] = pipeline_class(
-                pipeline_options=pipeline_options
-            )
+            with getattr(self, "_pipeline_init_lock", None) or threading.Lock():
+                if cache_key not in self.initialized_pipelines:
+                    _log.info(
+                        f"Initializing pipeline for {pipeline_class.__name__} with options hash {options_hash}"
+                    )
+                    self.initialized_pipelines[cache_key] = pipeline_class(
+                        pipeline_options=pipeline_options
+                    )
         else:
             _log.debug(
                 f"Reusing cached pipeline for {pipeline_class.__name__} with options hash {options_hash}"
