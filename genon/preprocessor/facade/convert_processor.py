@@ -102,7 +102,7 @@ from docling.document_converter import (
     HwpxFormatOption,
 )
 from docling.prompts.prompt_manager import LLMApiError
-from docling.utils.document_enrichment import enrich_document, check_document
+from docling.utils.document_enrichment import enrich_document, judge_document
 from docling.utils.llm_cache import (
     log_summary as _log_cache_summary,
     reset_context as _reset_cache_context,
@@ -1128,8 +1128,11 @@ class DocumentProcessor(DoclingRuntimeBase):
             return self.load_documents_with_docling_ocr(file_path, **kwargs)
         document: DoclingDocument = self.load_documents(file_path, **kwargs)
         if self.ocr_mode == "auto":
-            if not check_document(document, self.enrichment_options) or self.check_glyphs(document):
-                # OCR이 필요하다고 판단되면 OCR 수행
+            # #482: 판정 불가는 재OCR 사유가 아니다. convert 는 빈 페이지 검사를 쓰지 않는다(기존과 같음).
+            verdict = judge_document(document, self.enrichment_options)
+            reason = dops.reocr_reason(verdict, self.check_glyphs(document), False)
+            _log.info(f"[convert] 재OCR 판정 verdict={verdict.value} reason={reason}")
+            if reason != "none":
                 document = self.load_documents_with_docling_ocr(file_path, **kwargs)
         return document
 

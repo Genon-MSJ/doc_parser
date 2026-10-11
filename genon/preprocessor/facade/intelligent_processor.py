@@ -110,7 +110,7 @@ from docling.datamodel.pipeline_options import (
 )
 
 from docling.prompts.prompt_manager import LLMApiError
-from docling.utils.document_enrichment import enrich_document, check_document
+from docling.utils.document_enrichment import enrich_document, judge_document
 from docling.utils.llm_cache import (
     classify_error as _classify_error,
     current_context as _cache_current_context,
@@ -839,8 +839,11 @@ class DocumentProcessor(DoclingRuntimeBase):
             return self.load_documents_with_docling_ocr(file_path, **kwargs)
         document: DoclingDocument = self.load_documents(file_path, **kwargs)
         if self.ocr_mode == "auto":
-            if not check_document(document, self.enrichment_options) or self.check_glyphs(document) or self.check_empty_text(document):
-                # OCR이 필요하다고 판단되면 OCR 수행
+            # #482: 판정 불가는 재OCR 사유가 아니다(processing/common/docling_ops.reocr_reason).
+            verdict = judge_document(document, self.enrichment_options)
+            reason = dops.reocr_reason(verdict, self.check_glyphs(document), self.check_empty_text(document))
+            _log.info(f"[intelligent] 재OCR 판정 verdict={verdict.value} reason={reason}")
+            if reason != "none":
                 document = self.load_documents_with_docling_ocr(file_path, **kwargs)
         return document
 

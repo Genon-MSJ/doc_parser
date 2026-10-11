@@ -29,7 +29,7 @@ from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.prompts.prompt_manager import LLMApiError
-from docling.utils.document_enrichment import check_document, enrich_document
+from docling.utils.document_enrichment import enrich_document, judge_document
 from docling.utils.llm_cache import (
     classify_error as _classify_error,
     current_context as _cache_current_context,
@@ -746,11 +746,14 @@ class ParserCore:
             document = self._intel.load_documents(file_path, **kwargs)
             if ocr_mode == "auto":
                 # #329(task#1): /run(_load_document)과 동일한 auto 재OCR 휴리스틱으로 정합.
-                # 기존엔 check_empty_text 조건이 빠져 있어, /run 은 재OCR 하는 '텍스트 없는'
-                # 문서를 /parse 는 재OCR 하지 않아 다운스트림 청크가 달라졌다.
-                if (not check_document(document, self._intel.enrichment_options)
-                        or self._intel.check_glyphs(document)
-                        or self._intel.check_empty_text(document)):
+                # #482: 판정 불가(판정 LLM 없음·응답 없음)는 재OCR 사유가 아니다 — 예전엔
+                # `not check_document(...)` 가 판정 불가도 참으로 읽어 모든 PDF 를 두 번 변환했다.
+                verdict = judge_document(document, self._intel.enrichment_options)
+                reason = dops.reocr_reason(
+                    verdict, self._intel.check_glyphs(document), self._intel.check_empty_text(document))
+                _log.info(f"[parser] 재OCR 판정 verdict={verdict.value} reason={reason}: "
+                          f"{os.path.basename(file_path)}")
+                if reason != "none":
                     document = self._intel.load_documents_with_docling_ocr(file_path, **kwargs)
 
         if ocr_mode != "disable" and self._intel.ocr_endpoint:
