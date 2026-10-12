@@ -8,24 +8,26 @@ json 은 안 붙임). 그 기준을 "사람이 붙인 이름이 있는가" 하�
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
 
 import pytest
 import yaml
 
-from genon.preprocessor.facade.chunking import doc_prefix as dpx
-from genon.preprocessor.facade.common import config_parse as cp
-from genon.preprocessor.facade.enrichment.json_records import JsonRecordsMapper
-from genon.preprocessor.facade.enrichment.tabular_custom_fields import (
+from genon.preprocessor.processing.chunking import doc_prefix as dpx
+from genon.preprocessor.processing.common import config_parse as cp
+from genon.preprocessor.processing.enrichment.json_records import JsonRecordsMapper
+from genon.preprocessor.processing.enrichment.tabular_custom_fields import (
     TabularCustomFieldsMapper,
     build_chunk_text,
 )
 
-RESOURCE_DIR = Path(__file__).resolve().parents[2] / "resource"
+from shipped_config import PREPROCESSOR_DIR, SITE_MONIMO
+
+# 항목명 검사 대상(모니모 문서유형)은 사이트 폴더로 옮겨졌다.
+RESOURCE_DIR = PREPROCESSOR_DIR / SITE_MONIMO
 
 
 def _load_shipped(name: str) -> dict:
-    """출고 설정을 내부(v1) 형태로 읽는다(출고는 v2 표기다).
+    """출고 설정을 내부 형태로 읽는다(출고는 v2 표기다).
 
     번역 없이 raw 로 읽으면 v2 파일에서 `text_fields`/`field_labels` 가 빈 값이 되어
     검사가 **조용히 무력해진다** — 통과하지만 아무것도 보지 않는 상태가 된다.
@@ -93,11 +95,25 @@ def test_json_path_without_labels_stays_value_only():
 
 
 @pytest.mark.unit
-def test_multiline_block_keeps_no_label():
-    """여러 줄 블록은 자기 제목을 이미 갖고 있어 항목명을 붙이지 않는다."""
+def test_multiline_value_keeps_the_named_label_on_its_own_line():
+    """사람이 적어 준 항목명은 여러 줄 값에도 나간다 — 첫 줄에 붙이지 않고 따로 낸다.
+
+    `html_text` 가 만드는 값은 표·목록으로 시작해 자기 제목이 없는 경우가 대부분이라,
+    여러 줄이면 라벨을 버리는 종전 규칙에서는 설정의 `labels` 가 조용히 무시됐다.
+    """
+    content, _ = build_chunk_text(
+        {"CONTENT": "| 구 분 | 내 용 |\n| - | - |"}, ["CONTENT"], [],
+        field_labels={"CONTENT": "내용"},
+    )
+    assert content == "내용:\n| 구 분 | 내 용 |\n| - | - |"
+
+
+@pytest.mark.unit
+def test_multiline_value_drops_the_fallback_header_label():
+    """원천 헤더로 폴백한 이름은 종전대로 여러 줄 값에 붙이지 않는다."""
     content, _ = build_chunk_text(
         {"DETAIL_TEXT": "## 혜택\n- 5% 적립"}, ["DETAIL_TEXT"], [],
-        field_labels={"DETAIL_TEXT": "상세내용"},
+        column_map={"DETAIL_TEXT": ["상세설명"]},
     )
     assert content == "## 혜택\n- 5% 적립"
 
@@ -111,6 +127,61 @@ def test_chunk_prefix_carries_the_label_too():
     )
     assert prefix == "제목: 7월 이벤트"
     assert content.startswith(prefix)
+
+
+# 입력은 모니모 실물 샘플의 값이다.
+_STOCK_INSIGHT_JSON = (  # monimo_stock_insight_sample.txt 1행 detail_desc 의 첫 키
+    '{"trading_strategy": "현재 종가 346.44는 20일선(334.68)과 60일선(369.71) 사이에 위치하며, '
+    '5일선(350.73)은 종가 아래에 있음.<BR><BR>8월 13일 RSI는 50.1로 과매도 또는 과매수 구간에 '
+    '해당하지 않음."}'
+)
+_CS_SSS_HTML = (  # monimo_cs_sss_sample.json 첫 레코드 answer
+    "<div><p>시간외종가 주문은 <b>KRX</b> 장 개시 전과 KRX 장 종료 후, NXT 종가매매 주문으로 "
+    "구분됩니다.</p><ul><li>KRX 장 개시 전 시간외종가매매: 접수 08:30~08:40, 체결 08:40</li>"
+    "<li>KRX 장 종료 후 시간외종가매매: 접수 15:40~16:00, 체결 16:00</li></ul>"
+    "<p>체결가격은 당일 종가입니다.</p></div>"
+)
+_CS_SLF_INLINE = "모니모 앱에서 OTP  재발급<BR>신청 &amp; 해지는 어떻게 하나요?"  # cs_slf 4번째 question
+_CS_SLF_TEXT = "보험금 청구는 어떻게 하나요?"  # cs_slf 1번째 question
+# monimo_stock_insight_split_sample.txt 를 row_merge 한 DETAIL_DESC 의 일부. 흩어진 조각이
+# 잘못 이어져 JSON 으로 읽히지 않는다(broken_json). 본문에는 원문 그대로 둔다.
+_STOCK_INSIGHT_BROKEN = (
+    '{"RSI": "RSI는 8월 7일CD는 시그널선과 교차 상태로, 향후 상향 돌파 시 매수 신호로 '
+    '해석됩니다."}, "overall_diagnosis": "단기 반등 이후 방향성 확인이 필요한 구간입니다."}\n'
+    '13일 62.16까지 올랐으나, 이후 8월 '
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value, plain",
+    [
+        (_STOCK_INSIGHT_JSON, True),
+        (_CS_SSS_HTML, True),
+        (_CS_SLF_INLINE, True),
+        (_CS_SLF_TEXT, False),
+        (_STOCK_INSIGHT_BROKEN, False),
+    ],
+    ids=["json", "html", "html_inline", "text", "broken_json"],
+)
+def test_chunk_body_renders_json_and_html_like_to_text(value, plain):
+    """`to_text` 를 지정하지 않은 JSON·HTML 값도 본문에는 `to_text` 와 같은 평문으로 실린다.
+
+    필드 값(메타·해시 입력)은 그대로 두고, 이미 평문화된 값은 다시 바뀌지 않는다.
+    """
+    from genon.preprocessor.processing.enrichment.field_transforms import transform_to_text
+    from genon.preprocessor.processing.enrichment.tabular_custom_fields import (
+        structural_html_renderer,
+    )
+
+    renderer = structural_html_renderer()
+    fields = {"CONTENT": value}
+    content, _ = build_chunk_text(fields, ["CONTENT"], [], html_renderer=renderer)
+
+    assert content == (transform_to_text(value, html_renderer=renderer) if plain else value)
+    assert fields == {"CONTENT": value}
+    again, _ = build_chunk_text({"CONTENT": content}, ["CONTENT"], [], html_renderer=renderer)
+    assert again == content
 
 
 # ── 설정 해석 ────────────────────────────────────────────────────────────────
@@ -135,12 +206,16 @@ def test_resolve_field_labels_prefers_kwargs_over_document_metadata():
 def test_unknown_field_label_warns_but_does_not_fail(tmp_path, caplog):
     """이름을 잘못 적으면 라벨만 조용히 사라진다 — 기동 시 경고로 드러낸다."""
     cfg = """
-    key_map:
-      TITLE: [title]
-    field_labels:
-      TITLE: 제목
-      TITEL: 제목
-    text_fields: [TITLE]
+    schema: v2
+    source:
+      kind: records
+    fields:
+      TITLE: {alias: [title]}
+    body:
+      fields: [TITLE]
+      labels:
+        TITLE: 제목
+        TITEL: 제목
     """
     path = tmp_path / "custom_field_json.yaml"
     path.write_text(textwrap.dedent(cfg), encoding="utf-8")
@@ -199,9 +274,11 @@ _LABEL_EXEMPT_FIELDS = {"CS_CATEGORY"}
 
 @pytest.mark.unit
 @pytest.mark.parametrize("name", [
-    "custom_field_faq.yaml", "custom_field_faq_json.yaml", "custom_field_cs_sss.yaml",
+    "custom_field_faq.yaml", "custom_field_cs_sss.yaml",
     "custom_field_cs_slf.yaml", "custom_field_cs_ssf.yaml",
-    "custom_field_monimo_news.yaml", "custom_field_monimo_event.yaml",
+    # monimo_news 는 원천이 레코드 배열에서 HTML 문서 한 건으로 바뀌면서 본문 필드
+    # (text_fields)가 없는 `kind: html` 설정이 됐다. 검사 대상이 아니다.
+    "custom_field_monimo_event.yaml",
 ])
 def test_shipped_configs_name_every_body_field(name):
     """본문 필드는 모두 항목명을 갖는다 — 하나라도 빠지면 그 필드만 값으로 나가 불규칙해진다."""
@@ -212,39 +289,3 @@ def test_shipped_configs_name_every_body_field(name):
     missing = [f for f in body_fields
                if f not in labels and f not in _LABEL_EXEMPT_FIELDS]
     assert not missing, f"{name}: {missing} 에 항목명이 없습니다."
-
-
-@pytest.mark.unit
-def test_faq_xlsx_and_faq_json_agree_on_labels():
-    """같은 doc_type 이 원천 포맷에 따라 다른 본문 모양을 내지 않는다(이 작업의 출발점)."""
-    # 출고 설정은 v2 표기다. 이 검사는 "무엇을 만드는가"를 보는 것이라 표기와 무관해야
-    # 하므로, 매퍼가 하는 것과 같은 번역을 거쳐 내부(v1) 형태로 맞춘 뒤 비교한다.
-    tabular = _load_shipped("custom_field_faq.yaml")
-    json_cfg = _load_shipped("custom_field_faq_json.yaml")
-    assert tabular["field_labels"] == json_cfg["field_labels"]
-    assert tabular["text_fields"] == json_cfg["text_fields"]
-
-
-@pytest.mark.unit
-def test_shipped_faq_configs_produce_the_same_chunk_text():
-    """설정만이 아니라 두 매퍼의 실제 산출 본문이 같은지 확인한다."""
-    record = {"id": "1", "corp_code": "IFP", "depth3": "가입",
-              "depth4": "가입은 어떻게 하나요?", "description": "앱에서 가입할 수 있습니다."}
-    json_mapper = JsonRecordsMapper(
-        config_file="custom_field_faq_json.yaml", resource_path=str(RESOURCE_DIR),
-        doc_type="faq", extractor="json_mapping",
-    )
-    # 출고 설정의 records 키(faqMenuList)로 감싼다 — 원천 JSON 과 같은 모양.
-    json_rows = json_mapper.build_fields({"faqMenuList": [record]}, "faq")
-    json_text = json_mapper.to_parse_format(json_rows, "faq")["elements"][0]["content"]
-
-    tabular_mapper = TabularCustomFieldsMapper(
-        doc_type="faq", extractor="tabular_mapping",
-        config_file="custom_field_faq.yaml", resource_path=str(RESOURCE_DIR),
-    )
-    tabular_out = tabular_mapper.to_parse_format(
-        {"data": [{"sheet_name": "FAQ", "data_rows": [record]}]}, "faq")
-    tabular_text = tabular_out["elements"][0]["content"]
-
-    assert json_text == tabular_text
-    assert json_text == "질문: 가입은 어떻게 하나요?\n답변: 앱에서 가입할 수 있습니다."

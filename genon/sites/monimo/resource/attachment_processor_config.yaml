@@ -1,0 +1,107 @@
+# attachment_processor 기본 설정
+# DocumentProcessor() 무인자 호출 시 이 파일을 우선 로드한다.
+
+defaults:
+  # 5=DEBUG, 4=INFO, 3=WARNING, 2=ERROR, 1=CRITICAL, 0=NOLOG
+  log_level: 4
+
+  # 입력 포맷 자동 PDF 변환 엔진 선택 (ppt/txt/md/img→pdf, hwp 폴백 등 전 변환 경로 공용)
+  use_pdf_sdk: true
+
+# 포맷별 옵션 컨테이너
+# ── 모델 프리셋 ───────────────────────────────────────────────────────────────
+# 모델·외부 서비스 접속 정보(LLM 서빙 주소·키, OCR·layout·whisper·guardrail 주소)는
+# model_presets.yaml 에 모여 있고, 쓰는 자리에서는 `model_preset: <이름>` 한 줄로 부른다.
+# 규칙과 담을 수 있는 값은 그 파일 머리말을 참고한다.
+model_presets_file: model_presets.yaml
+
+formats:
+  # HWP/HWPX: SDK 백엔드 파싱 옵션
+  hwp:
+    # SDK 백엔드 사용 여부 (false=레거시 backend 로 폴백)
+    use_hwp_sdk: true
+    # use_hwp_sdk=true 일 때만 유효한 SDK 출력 덤프(디버그)
+    dump_sdk_output: false
+    # 이미지 저장 여부
+    save_images: true
+
+  # PPT(ppt/pptx): PDF 변환 → 경량 docling 파싱 → 페이지 기반 청킹(기본 1 page 1 chunk,
+  # chunk_size 지정 시 연속 페이지 결합). page_description 으로 "페이지 자체"를 VLM 설명.
+  # (첨부용은 dotsocr 미수행 + do_ocr=false 최소 파싱, bbox 미추출)
+  ppt:
+    # 첨부용은 속도 우선: 병렬도↑, 이미지/출력 축소, 간결 프롬프트.
+    page_description:
+      # true 면 각 페이지를 렌더링해 VLM 설명(+native text 프롬프트 포함). false 면 파싱만 수행.
+      enable: false
+      # VLM(chat/completions) 엔드포인트
+      model_preset: page
+      timeout: 360
+      concurrency: 32          # 페이지 설명 요청 병렬 수(속도↑; VLM 서버 처리량 한도 내)
+      images_scale: 1.0        # 페이지 렌더 배율↓(payload·image token↓ → 추론↓)
+      max_image_side: 1536     # 전송 전 이미지 최대 변(px) 캡(payload↓). 0=원본
+      max_tokens: 512          # VLM 출력 토큰 상한(생성 시간↓). 0=상한 없음
+      # 서버가 max_completion_tokens 등 다른 키를 쓰면 params 로 전달:
+      # params: { max_completion_tokens: 512 }
+      # 프롬프트: 첨부용은 간결(2~3문장) 버전 사용
+      prompt_template_file: prompt_page_image_description_fast.md
+
+chunking:
+  # 청킹 모드: "recursive"(문자수 기반, 기본) | "hybrid"(layout 구조 기반; hwp/hwpx/docx 에만 적용)
+  chunker_type: "recursive"
+
+  # 청크 크기(공통): recursive 모드=문자 수 · hybrid 모드=토큰 수. 0=크기 기반 분할 안 함(전체 1청크)
+  chunk_size: 1000000
+
+  # 문자수 기반 청킹 (전 포맷 공용: pdf/txt/md/img/ppt/hwp/hwpx/docx). chunker_type: recursive 일 때.
+  recursive:
+    chunk_overlap: 100
+
+  # layout 구조 기반 청킹 (선택 모드). chunker_type: hybrid 일 때 hwp/hwpx/docx 에만 적용.
+  # (토크나이저는 위 chunking.tokenizer_path/tokenizer_id 를 공용으로 사용)
+  hybrid:
+    # 토큰 수 계산 방식. "char"(default)=문자 수 기준 | "huggingface"=HF 토크나이저 기준
+    tokenizer_type: "char"
+    merge_peers: true
+
+  # 청킹용 토크나이저 기본값(hybrid 경로 등). tokenizer_path 가 실제 존재하면 그 경로,
+  # 없으면 tokenizer_id(HF) 로 폴백 (외부 네트워크 차단 환경 대비)
+  tokenizer_path: "/models/doc_parser_models/sentence-transformers-all-MiniLM-L6-v2"
+  tokenizer_id: "sentence-transformers/all-MiniLM-L6-v2"
+
+# 출력 표현 옵션
+output:
+  # markdown 표 컬럼 정렬 패딩 제거(대형 표 축소). 기본 true
+  compact_tables: true
+
+loaders:
+  image:
+    # 이미지 OCR 언어
+    ocr_languages: ["kor", "eng"]
+
+  tabular:
+    # CSV 인코딩 감지 시 샘플링 바이트 수
+    encoding_detect_sample_bytes: 10000
+
+# 음성 파일(.wav/.mp3/.m4a) 처리 기본값. 음성 처리 시에만 필요(선택).
+whisper:
+  model_preset: whisper   # 서버 주소는 model_presets.yaml
+  model: "model"
+  language: "ko"
+  response_format: "json"
+  temperature: "0"
+  stream: "false"
+  timestamp_granularities: "word"
+  chunk_sec: 29
+  chunk_overlap_ms: 300
+  # 끝에 / 를 주면 디렉터리로 간주해 내부에 파일명 기준 하위 폴더 생성
+  tmp_dir_prefix: "./tmp_audios_"
+
+# PII 마스킹(#315) — GenOS Guardrail 연동.
+# on/off 는 요청별 kwargs(guardrail_call, 기본 off)로 제어. 아래는 접속 정보(환경 종속값)만.
+# 적용 범위: docx/hwp(docling), 기타 langchain 경로(else/ppt·hwp 폴백). audio/tabular 는 보류(미적용).
+
+guardrail:
+  # GenOS 분류 워크플로우 연동(#315). 기능 on/off 는 요청별 kwargs(guardrail_call)로 제어.
+  model_preset: guardrail   # 접속 정보(url, workflow_id, api_key)는 model_presets.yaml
+  timeout: 60             # 워크플로우 호출 타임아웃(초). 대용량 문서는 상향 필요
+  masking_enabled: false  # quote_masked 치환 on/off. content_category 메타 부착은 기능 켜지면 항상 수행

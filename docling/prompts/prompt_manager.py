@@ -6,27 +6,10 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from docling.utils.llm_cache import cached_call, remaining_timeout
+# thinking(추론) 토글 공유 헬퍼. genon enricher 와 같은 단일 소스를 쓴다.
+from docling.utils.thinking import resolve_thinking_kwargs, strip_reasoning
 
 _log = logging.getLogger(__name__)
-
-# thinking(추론) 토글 공유 헬퍼. enrichment 패키지의 단일 소스를 재사용한다.
-# 일부 로컬 테스트 환경에서는 facade import 가 깨질 수 있어(no-op 폴백) 레거시 경로를 보호한다.
-try:
-    from genon.preprocessor.facade.enrichment.thinking import (
-        resolve_thinking_kwargs,
-        strip_reasoning,
-    )
-except Exception:  # pragma: no cover - import 환경에 따른 폴백
-    def resolve_thinking_kwargs(mode, dialect="standard"):
-        return None
-
-    def strip_reasoning(message):
-        import re
-        if isinstance(message, dict):
-            content = (message.get("content") or "").strip()
-        else:
-            content = (message or "").strip()
-        return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
 
 
 class LLMApiError(Exception):
@@ -487,6 +470,13 @@ class PromptManager:
             if ctk:
                 payload["chat_template_kwargs"] = ctk
 
+            # Extra request parameters passed through verbatim. Merged last so an explicitly
+            # configured value wins over the named options above. This has to happen here, not
+            # inside the transport hook, because the cache key below is (url, payload).
+            extra_params = api_config.get("params")
+            if isinstance(extra_params, dict):
+                payload.update(extra_params)
+
             if not self._run_prompt_precheck(
                 messages=messages,
                 model_config=model_config,
@@ -506,7 +496,14 @@ class PromptManager:
             _log.debug(f"API 요청 URL ({category}): {api_url}")
             _log.debug(f"API 요청 페이로드 ({category}): {json.dumps(payload, ensure_ascii=False, indent=2)}")
 
+            # 전송을 호스트 애플리케이션이 맡는 경우(genon 전처리기). docling 은 무엇을
+            # 물어볼지만 정하고 헤더·타임아웃·재시도·응답 해석은 넘긴 쪽이 책임진다.
+            # 미설정이면 아래 기본 requests 경로가 그대로 돈다(업스트림/단독 사용 보존).
+            chat_sender = api_config.get("chat_sender")
+
             def _produce() -> Optional[str]:
+                if chat_sender is not None:
+                    return chat_sender(url=api_url, payload=payload, headers=headers)
                 # requests.post로 API 호출 (#329: llm_cache opt-in 시 캐시 경유, 미사용 시 그대로)
                 response = requests.post(
                     api_url,

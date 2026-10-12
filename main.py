@@ -26,6 +26,7 @@ from utils import make_success_response
 from config import cors_config
 from common.exception import GenosServiceException
 from common.settings import settings
+from common.version_info import get_version_info
 from util.minio_resource import download_resource_files
 
 sys.path.append(os.path.dirname(__file__) + '/util')
@@ -122,6 +123,14 @@ async def health() -> object:
     return {'status': 'ok'}
 
 
+# 배포된 산출물이 자기 버전을 보고한다. 값은 배포 시 생성되는 루트 VERSION 스탬프에서 읽고,
+# 소스 저장소에서 직접 띄운 경우엔 git 으로 폴백한다(common/version_info.py).
+# /health 는 프로브가 자주 때리므로 응답 계약을 늘리지 않고 별도 경로로 분리한다.
+@app.get('/version')
+async def version() -> object:
+    return get_version_info(BASE_DIR)
+
+
 if settings.PREPROCESSOR_ID:
     download_resource_files(
         bucket_name='preprocessor',
@@ -136,10 +145,9 @@ from genon.preprocessor.facade.convert_processor import DocumentProcessor as Con
 from genon.preprocessor.facade.parser_processor import DocumentProcessor as ParserDocumentProcessor
 from genon.preprocessor.facade.chunking_processor import DocumentProcessor as ChunkingDocumentProcessor
 
-# config 는 resource/ 로 고정한다. (무인자 생성 시 facade 기본 해석기가 resource_dev/ 를
-# 우선하므로, resource_dev 유무와 무관하게 항상 출고용 resource/ 를 읽도록 config_path 를 명시.)
-# resource_dev 로 테스트하려면 아래 "resource" 를 "resource_dev" 로만 바꾸면 된다.
-RESOURCE_DIR = BASE_DIR / "genon" / "preprocessor" / "resource"
+# config 는 출고용 resource/ 를 읽는다. GENOS_RESOURCE_DIR 은 로컬 실행에서 사이트 완성본
+# (예: genon/sites/monimo/resource)을 띄울 때만 쓴다(build-script/run-local.sh 가 설정한다).
+RESOURCE_DIR = Path(os.environ.get("GENOS_RESOURCE_DIR") or BASE_DIR / "genon" / "preprocessor" / "resource")
 
 
 def _cfg(name: str) -> str:
@@ -185,7 +193,8 @@ async def _run(tag, processor, request, file_path, params, marker=None):
         else:
             data = await asyncio.wait_for(processor(request, file_path, **params), timeout=rd)
         logger.info(f'[{tag}] Success: "{file_path}"')
-        return make_success_response(data=data)
+        return make_success_response(
+            data=data, chunk_validation=getattr(request.state, 'chunk_validation', None))
     except asyncio.TimeoutError as e:
         logger.error(f'[{tag}] Error(timeout): "{file_path}" (request_deadline exceeded)')
         return _error_response(tag, file_path, e, error_code=ERROR_CODE_TIMEOUT, stage='request')

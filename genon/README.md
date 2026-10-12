@@ -8,45 +8,53 @@
 ├── docling
 ├── docs
 ├── genon
+│   ├── legal_parser # 법령 수집·파싱 독립 서비스 (전처리기와 무관)
+│   │   ├── api
+│   │   ├── commons
+│   │   ├── parsers
+│   │   ├── schemas
+│   │   └── services
 │   ├── preprocessor # genos에서 실행 될 전처리기 이미지 및 facade 관련
 │   │   ├── configs # gunicorn, supervisor 설정
 │   │   ├── docker # 도커파일 위치
-│   │   ├── env # 개발 시 설정 파일들
-│   │   ├── facade # facade 코드
-│   │   │   ├── evaluation
-│   │   │   │   └── test_files
-│   │   │   │       ├── annotated
-│   │   │   │       ├── pdf
-│   │   │   │       └── result
-│   │   │   ├── gitbook_doc
-│   │   │   │   └── images
-│   │   │   ├── legacy
-│   │   │   └── legal_parser
-│   │   │       ├── api
-│   │   │       ├── commons
-│   │   │       ├── parsers
-│   │   │       ├── schemas
-│   │   │       └── services
+│   │   │   └── assets # 도커 빌드 전용 폰트·tessdata tar
+│   │   ├── env # 서버 환경변수 프로파일(.env.dev, .env.prod). 이미지의 /app/env 로 복사됨
+│   │   ├── examples # 고객이 붙여 쓰는 최소 예제(facade 실행, 훅, 텍스트 정제, curl 호출)
+│   │   ├── facade # facade 코드(*_processor.py)
+│   │   ├── manual # 고객·현장용 매뉴얼
+│   │   │   └── images
+│   │   ├── processing # 파싱·청킹·보강 처리 라이브러리(facade 가 상속·호출)
+│   │   │   ├── chunking
+│   │   │   ├── common
+│   │   │   ├── converters # 입력 전처리 변환기
+│   │   │   ├── core
+│   │   │   ├── enrichment
+│   │   │   ├── guardrail
+│   │   │   └── serialize # 파서 결과를 응답 dict 로 변환
+│   │   ├── resource # 표준 YAML 설정·프롬프트(facade 기본 해석기가 읽음)
 │   │   ├── scripts # 도커 이미지 push 및 디비 등록 관련 스크립트 위치
-│   │   ├── resources # 폰트 및 기타 리소스 파일들
-│   │   ├── sample_files
+│   │   ├── sample_files # 샘플 입력 문서
 │   │   ├── src # 전처리기 API 소스
 │   │   │   └── common
-│   │   └── tests # genos doc-parser 테스트 소스
-│   │       ├── regression
-│   │       │   └── baselines
-│   │       ├── smoke
-│   │       └── unit
-│   ├── serving # ocr 및
+│   │   ├── tests # genos doc-parser 테스트 소스
+│   │   │   ├── regression
+│   │   │   │   └── baselines
+│   │   │   ├── smoke
+│   │   │   └── unit
+│   │   └── tools # 손으로 돌리는 검증·개발 도구(facade_test, parse_chunk 등)
+│   ├── serving # OCR 모델 서빙 이미지
 │   │   └── paddle
 │   │       ├── config # ocr, vl paddlex 실행 파일
 │   │       ├── docker
 │   │       ├── etc
 │   │       ├── k8s-manifest
 │   │       └── resources
-│   └── tools
-│       └── genos_tools
-│           └── commands
+│   ├── sites # 고객사이트별 설정 완성본과 전용 facade (배포본 제외, 별도 전달)
+│   ├── tools # 독립 CLI(genos-tools: 청크 내보내기·뷰어)
+│   │   └── genos_tools
+│   │       └── commands
+│   └── train # 레이아웃 모델 파인튜닝
+│       └── layout
 └── tests # docling 리포 test 관련 코드 작성 x
 ```
 
@@ -185,13 +193,13 @@ GenOS **코드서빙** 기능으로 띄우는 경로이며, 동작 방식이 전
   콜드스타트 단축 + 에어갭(오프라인) 동작을 위해 **base 이미지에 빌드 시점에 pre-bake** 한다
   (`Dockerfile.standard` 와 full parity).
 - 배포 후 게이트웨이로 호출하는 방법(`/health`·`/parser`·`/chunker` 등)은
-  [`preprocessor/facade/gitbook_doc/code_serving.md`](preprocessor/facade/gitbook_doc/code_serving.md) 참고.
+  [`preprocessor/manual/code_serving.md`](preprocessor/manual/code_serving.md) 참고.
 
 > 빌드 방식·pre-bake 아티팩트 목록·의존성 동기화 주의사항 등 상세는
 > [`build-script/code-serving-doc-parser/README.md`](../build-script/code-serving-doc-parser/README.md) 참고.
 
 > **타사(외부) 개발자에게 전처리기 코드 수정을 넘길 때는**
-> [`preprocessor/facade/gitbook_doc/code_serving_dev_manual.md`](preprocessor/facade/gitbook_doc/code_serving_dev_manual.md)
+> [`preprocessor/manual/code_serving_dev_manual.md`](preprocessor/manual/code_serving_dev_manual.md)
 > 를 안내한다 — 공개 배포본 repo 만으로 개발환경 세팅 → parser/chunker 코드 이해·수정 → gitea push →
 > 리비전 재배포까지 할 수 있게 쓴 매뉴얼이다(이미지 빌드·원본 repo 접근은 전제하지 않음).
 > **아래 A~C(이미지 빌드·최초 등록)는 사내 담당자 몫**이며 그 매뉴얼에는 포함되지 않는다.
@@ -248,7 +256,7 @@ echo "HWP_SDK_TOKEN=hf_xxx" >> build-script/hf_private_token.env
     ```
 
   - doc_parser github debelop 브랜치 전체 코드를 gitea 레포지터리에 복사 후 gitea 레포지터리에서 commit/push 를 수행한다.
-    - 이 때 `genon/preprocessor/resource`의 yaml 파일을 기반으로 전처리기가 동작하므로 실행환경에 맞게 수정한후 commit/push를 해야 한다. [매뉴얼 참조](https://github.com/genonai/doc_parser/tree/develop/genon/preprocessor/facade/gitbook_doc)
+    - 이 때 `genon/preprocessor/resource`의 yaml 파일을 기반으로 전처리기가 동작하므로 실행환경에 맞게 수정한후 commit/push를 해야 한다. [매뉴얼 참조](https://github.com/genonai/doc_parser/tree/develop/genon/preprocessor/manual)
     - 코드서빙으로 서빙할 전처리기의 config yaml은 아래와 같다.
       - parser/chunking 만 사용하는 경우: parser_processor_config.yaml, chunking_processor_config.yaml 수정
       - 적재용 전처리기 사용하는 경우: intelligent_processor_config.yaml
@@ -287,13 +295,13 @@ echo "HWP_SDK_TOKEN=hf_xxx" >> build-script/hf_private_token.env
   - 리비전 생성시 이미지는 `mnc/template-code-serving-doc-parser` 를 선택한다
   - 리비전 생성시 gpu 할당은 하지 않고, medium (1 CPU Core, 16 Gb Memory) 수준의 인스턴스를 생성하면 된다.
 
-- 호출(게이트웨이 URL·엔드포인트·예시)은 [`preprocessor/facade/gitbook_doc/code_serving.md`](preprocessor/facade/gitbook_doc/code_serving.md) 참고.
+- 호출(게이트웨이 URL·엔드포인트·예시)은 [`preprocessor/manual/code_serving.md`](preprocessor/manual/code_serving.md) 참고.
 
-  - 기본 테스트는 [테스트 코드](https://github.com/genonai/doc_parser/blob/develop/genon/preprocessor/examples/code_serving/serving_gateway_test.py) 를 참고해서 테스트 가능
+  - 기본 테스트는 [테스트 코드](https://github.com/genonai/doc_parser/blob/develop/genon/preprocessor/tools/code_serving/serving_gateway_test.py) 를 참고해서 테스트 가능
 
-## 로컬 테스트 (도커 빌드 없이 test.py 실행)
+## 로컬 테스트 (도커 빌드 없이 facade_run.py 실행)
 
-도커를 거치지 않고 `genon/preprocessor/facade/test.py` 등을 로컬에서 바로 실행하려면, **HWP SDK · PDF SDK를 레포 최상위에 직접 다운로드**해야 한다. (코드가 `<repo_root>/hwp_sdk`, `<repo_root>/pdf_sdk` 경로를 자동으로 찾음)
+도커를 거치지 않고 `genon/preprocessor/examples/facade_run/facade_run.py` 등을 로컬에서 바로 실행하려면, **HWP SDK · PDF SDK를 레포 최상위에 직접 다운로드**해야 한다. (코드가 `<repo_root>/hwp_sdk`, `<repo_root>/pdf_sdk` 경로를 자동으로 찾음)
 
 > 아래 명령어들은 **레포가 위치한 호스트 머신의 터미널**에서 실행한다 (도커 컨테이너 안 셸이 아님). 컨테이너 안에서 macOS 절대경로로 받으면 컨테이너 내부 가상 경로에 저장돼 호스트에 반영되지 않으니 주의. 만약 컨테이너 안에서 받고 싶다면 cwd를 마운트된 repo root(예: `/app/docparser_work_187/doc_parser`)로 옮긴 뒤 상대경로(`./hwp_sdk`, `./pdf_sdk`)로 받아야 한다.
 
@@ -322,7 +330,7 @@ echo "HWP_SDK_TOKEN=hf_xxx" >> build-script/hf_private_token.env
    chmod +x ./pdf_sdk/pdfConverter
    ```
 3. 두 디렉토리(`hwp_sdk/`, `pdf_sdk/`)는 `.gitignore`에 포함되어 있어 커밋되지 않음
-4. 이후 `genon/preprocessor/facade/test.py` 실행 시 별도 환경변수 설정 없이 동작
+4. 이후 `genon/preprocessor/examples/facade_run/facade_run.py` 실행 시 별도 환경변수 설정 없이 동작
 
 > 도커 환경에서는 빌드 단계에서 두 SDK가 자동으로 `/app/hwp_sdk`, `/app/pdf_sdk` 에 설치되며, `PDF_SDK_HOME` 환경변수로 SDK 경로가 제어됨. 로컬에서는 위 경로 fallback이 자동 적용됨.
 

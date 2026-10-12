@@ -6,7 +6,7 @@
 
 import pytest
 
-from genon.preprocessor.facade.enrichment.json_records import (
+from genon.preprocessor.processing.enrichment.json_records import (
     html_to_text,
     normalize_table_format,
 )
@@ -73,6 +73,22 @@ def test_table_caption_survives_every_format():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("fmt", ["html", "markdown", "auto"])
+def test_layout_table_keeps_paragraph_lines(fmt):
+    """셀 하나에 본문 전체를 담은 레이아웃 표는 문단마다 줄을 바꾼 평문으로 나간다(#396).
+
+    docling 은 셀 텍스트를 만들 때 `<p>` 사이를 공백 하나로 이어, 표 표기로 내면 문단 경계가
+    사라지고 크기 분할이 문장 중간에서 잘랐다. 청커의 레이아웃 표 평문화와 같은 렌더러를 쓴다.
+    """
+    paragraphs = ["Q1. 원본이 필요한가요?", "A. 사본으로도 청구할 수 있습니다.",
+                  "Q2. 언제 지급되나요?", "A. 서류 접수 후 3영업일 이내입니다."]
+    cell = "".join(f"<p>{text}</p>" for text in paragraphs)
+    text = html_to_text(f"<table><tbody><tr><td>{cell}</td></tr></tbody></table>",
+                        table_format=fmt)
+    assert text.splitlines() == paragraphs
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("fmt,expect_md", [("html", False), ("markdown", True)])
 def test_rows_path_honors_table_format(tmp_path, fmt, expect_md):
     """rows(tabular_mapping) 경로도 프로세서의 `output.table_format` 을 따른다.
@@ -83,15 +99,18 @@ def test_rows_path_honors_table_format(tmp_path, fmt, expect_md):
     """
     import textwrap
 
-    from genon.preprocessor.facade.enrichment.tabular_custom_fields import (
+    from genon.preprocessor.processing.enrichment.tabular_custom_fields import (
         TabularCustomFieldsMapper,
     )
 
     (tmp_path / "custom_field_t.yaml").write_text(textwrap.dedent("""
-        column_map: {RAW: [내용], DETAIL: [내용]}
-        required: [RAW]
-        transforms: {DETAIL: html_text}
-        text_fields: [DETAIL]
+        schema: v2
+        source: {kind: rows}
+        fields:
+          RAW: {alias: [내용]}
+          DETAIL: {alias: [내용], transform: html_text}
+        require: {fields: [RAW]}
+        body: {fields: [DETAIL]}
     """), encoding="utf-8")
     mapper = TabularCustomFieldsMapper(
         config_file="custom_field_t.yaml", resource_path=str(tmp_path),

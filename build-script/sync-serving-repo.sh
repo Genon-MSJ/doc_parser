@@ -6,7 +6,7 @@ set -euo pipefail
 # 동작: 배포에 필요한 것만(whitelist: genon/ + main.py + requirements.txt + Dockerfile) 서브모듈 폴더 `code-serving/`에
 #       재생성하고, docling wheel 을 packages/ 로 동봉 + requirements.txt 에 wheel 경로 append +
 #       배포본 root README.md(코드서빙 사용 가이드, build-script/code-serving-README.md) 복사 +
-#       requirements-dev.txt(로컬 facade/test.py 실행 전용 deps), constraints-cpu.txt와 .gitignore/.dockerignore 생성 후,
+#       requirements-dev.txt(로컬 examples/facade_run/facade_run.py 실행 전용 deps), constraints-cpu.txt와 .gitignore/.dockerignore 생성 후,
 #       배포본 repo(genonai/doc_parser_code_serving) 안에서 commit/push 한다.
 #
 # 왜: 코드서빙은 GenOS 가 런타임에 배포본 repo 를 /app/src/service 로 clone 해 main.py 를 띄우고,
@@ -72,25 +72,31 @@ fi
 # Dockerfile: 코드서빙이 리비전 부팅 시 배포본 루트의 이 파일로 이미지를 빌드한다(main.py 와 같은 위치).
 WHITELIST=("genon" "main.py" "requirements.txt" "Dockerfile")
 
-# whitelist 로 가져온 뒤 배포본에서 제거할 하위 폴더 (dev/legacy/build — 서빙 런타임 무의존).
-#   main.py 는 production resource/ 를 config_path 로 고정하므로 resource_dev 제외해도 무영향.
+# whitelist 로 가져온 뒤 배포본에서 제거할 하위 폴더 (dev/build — 서빙 런타임 무의존).
+#   genon/sites 는 고객사이트별 설정 완성본·전용 facade·로컬(VPN) 접속값이라 배포본에 넣지 않는다.
+#   배포본 main.py 는 표준 resource/ 를 읽는다(GENOS_RESOURCE_DIR 는 로컬 전용).
 EXCLUDE_PATHS=(
-  "genon/preprocessor/resource_dev"
-  "genon/preprocessor/docker"
-  "genon/preprocessor/facade/legacy"
+  "genon/preprocessor/docker"                # Dockerfile·빌드 전용 폰트 tar(docker/assets)
   "genon/serving"
   "genon/train"
+  "genon/legal_parser"                       # 전처리기와 무관한 독립 법령 수집기
   # 2차 검토 추가 (활성 facade/main.py 무의존 검증됨)
-  "genon/preprocessor/facade/legal_parser"   # 미사용 독립 파서
   "genon/tools"                              # CLI 도구(런타임 무관)
-  "genon/preprocessor/resources"             # 폰트·tessdata tar (베이스 이미지에 이미 포함)
+  "genon/sites"                              # 고객사이트 설정·전용 facade(별도 전달)
   "genon/preprocessor/scripts"               # 이미지 등록 스크립트
   # 사내 전용 문서 — 공개 배포본에 나갈 필요가 없고, 배포본에 없는 폴더(build-script/·docling/·docs/)를
   # 안내해 오히려 혼란을 준다. 코드서빙 사용/설치 안내는 배포본 root README.md 가 담당한다.
   "genon/README.md"                          # 사내 개발 문서(이미지 빌드·paddle·vllm)
+  # 고객 실 원천과 사내 계획 문서 (#363 08). whitelist 가 genon 전체라 여기 적지 않으면
+  # 공개 배포본으로 그대로 나간다.
+  #   sample_files/monimo  고객사 실 문서 48건. 일반 샘플(pdf_sample 등)은 남긴다 —
+  #                        고객이 parse_chunk_golden.py 로 자기 기준선을 찍을 때 쓴다.
+  #   docs                 내부용 계획 문서 자리. 지금은 비어 있지만(2026-09-16 정리)
+  #                        다시 생기면 그대로 공개 배포본에 나가므로 제외를 남겨 둔다.
+  "genon/preprocessor/sample_files/monimo"
+  "genon/preprocessor/docs"
   "genon/MAINTAINERS.md"                     # docling 원본 메인테이너 잔존물
   "genon/dotsocr_vllm_max_num_seqs.md"       # 사내 모델 서빙 튜닝 메모
-  "genon/preprocessor/facade/README.md"      # 구버전 facade 문서(현재 트리와 불일치). 대체: gitbook_doc/
 )
 
 SOURCE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse "${SOURCE_REF}")"
@@ -151,7 +157,7 @@ mkdir -p "${DEST}"
 find "${DEST}" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 git -C "${ROOT_DIR}" archive "${SOURCE_REF}" "${WHITELIST[@]}" | tar -x -C "${DEST}"
 
-# 제외 하위 폴더 제거 (dev/legacy/build)
+# 제외 하위 폴더 제거 (dev/build)
 for p in "${EXCLUDE_PATHS[@]}"; do
   rm -rf "${DEST:?}/${p}"
 done
@@ -214,9 +220,10 @@ cat > "${DEST}/.dockerignore" <<'EOF'
 .idea/
 offline-dev-kit/
 wheelhouse/
-genon/preprocessor/facade/result.json
-genon/preprocessor/examples/parse_chunk/result_parse_chunk/
-genon/preprocessor/examples/code_serving/result_serving_gateway_test/
+genon/preprocessor/examples/facade_run/result.json
+genon/preprocessor/tools/parse_chunk/result_parse_chunk/
+genon/preprocessor/tools/facade_test/result_facade_test/
+genon/preprocessor/tools/code_serving/result_serving_gateway_test/
 EOF
 echo "[INFO] .dockerignore 생성: ${DEST}/.dockerignore"
 
@@ -279,9 +286,10 @@ htmlcov/
 .idea/
 
 # Local test outputs
-genon/preprocessor/facade/result.json
-genon/preprocessor/examples/parse_chunk/result_parse_chunk/
-genon/preprocessor/examples/code_serving/result_serving_gateway_test/
+genon/preprocessor/examples/facade_run/result.json
+genon/preprocessor/tools/parse_chunk/result_parse_chunk/
+genon/preprocessor/tools/facade_test/result_facade_test/
+genon/preprocessor/tools/code_serving/result_serving_gateway_test/
 
 # Platform-specific offline development kits (distribute separately; do not commit)
 offline-dev-kit/
@@ -315,6 +323,11 @@ echo "[INFO] VERSION 스탬프 생성: ${DEST}/VERSION (source_version=${VERSION
 if find "${DEST}" -type f -path '*/docling/__init__.py' | grep -q .; then
   echo "[ERROR] 배포본에 docling 패키지 소스가 남아 있습니다:" >&2
   find "${DEST}" -type f -path '*/docling/__init__.py' >&2
+  exit 1
+fi
+# 고객사이트 자산(현장 설정, 타 고객사 facade, VPN 접속값)이 배포본에 섞이면 안 된다.
+if [[ -e "${DEST}/genon/sites" ]]; then
+  echo "[ERROR] 배포본에 genon/sites 가 남아 있습니다 — EXCLUDE_PATHS 를 확인하십시오." >&2
   exit 1
 fi
 for f in "main.py" "genon" "packages/${WHEEL_NAME}"; do
@@ -368,7 +381,7 @@ if [[ ! -f "${DEST}/VERSION" ]]; then
   echo "[ERROR] VERSION 스탬프가 생성되지 않았습니다." >&2
   exit 1
 fi
-echo "[SMOKE] 배포본 청결성 OK — docling 소스 없음, genon/+main.py 존재, packages/${WHEEL_NAME} 동봉됨, Dockerfile·requirements-dev.txt·constraints-cpu.txt·.gitignore·.dockerignore·VERSION 생성됨"
+echo "[SMOKE] 배포본 청결성 OK — docling 소스 없음, genon/sites 없음, genon/+main.py 존재, packages/${WHEEL_NAME} 동봉됨, Dockerfile·requirements-dev.txt·constraints-cpu.txt·.gitignore·.dockerignore·VERSION 생성됨"
 echo "[INFO] 배포본 조립 위치: ${DEST}  (원본 커밋 ${SOURCE_COMMIT})"
 
 # ── 4) 배포본 클론이면 commit/push ──────────────────────────────────────────

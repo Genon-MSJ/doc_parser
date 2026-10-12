@@ -1,4 +1,4 @@
-"""청크 텍스트 정규화(facade/chunking/text_norm.py) 단위 테스트.
+"""청크 텍스트 정규화(processing/chunking/text_norm.py) 단위 테스트.
 
 정규화가 "의도한 문자만 바꾼다"를 단정문으로 고정한다. 본문 전문은 출력하지 않는다.
 text_norm 자체는 docling 의존이 없으므로 importorskip 없이 항상 실행된다.
@@ -6,7 +6,7 @@ text_norm 자체는 docling 의존이 없으므로 importorskip 없이 항상 �
 
 import pytest
 
-from genon.preprocessor.facade.chunking import text_norm as tn
+from genon.preprocessor.processing.chunking import text_norm as tn
 
 pytestmark = pytest.mark.unit
 
@@ -52,6 +52,16 @@ def test_nfc_recomposes_decomposed_hangul():
 
 def test_removes_zero_width_and_bom():
     assert tn.sanitize("﻿한​국‍어­") == "한국어"
+
+
+@pytest.mark.parametrize("ch, kept", [
+    ("\u202e", False),   # 예전 하드코딩 목록에 없던 Cf
+    ("\ufffd", True), ("\ue000", True),
+])
+def test_format_chars_removed_by_category(ch, kept):
+    """제거 대상은 유니코드 Cf 카테고리 전체다. U+FFFD·사설 영역은 Cf 가 아니므로
+    손상 판정이 볼 수 있도록 남는다."""
+    assert tn.sanitize(f"가{ch}나") == (f"가{ch}나" if kept else "가나")
 
 
 def test_special_spaces_become_plain_space():

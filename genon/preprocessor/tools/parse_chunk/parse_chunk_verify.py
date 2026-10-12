@@ -1,0 +1,1201 @@
+#!/usr/bin/env python
+"""custom_fields doc_type 별 파싱→청킹 자동 검증.
+
+parse_chunk_test.sh 는 손으로 돌려보는 놀이터고, 이 스크립트는 "항상 돌리는" 검증이다.
+doc_type 마다 샘플을 파싱·청킹한 뒤, 그 doc_type 의 custom_field yaml 이 약속한 것이
+실제 청크에 실렸는지 단정한다.
+
+무엇을 단정하나
+  - 청크가 1개 이상 나온다
+  - 모든 청크에 doc_type 스탬프가 있다
+  - yaml 의 required(필수 목표필드)가 모든 청크에 있고 비어 있지 않다
+  - yaml 의 constants 값이 청크에 그대로 실렸다
+  - llm_fields / output_fields 는 실패해도 통과로 본다(on_error:null 정책). 다만
+    null 비율을 리포트해 모델서빙이 죽었는지 눈에 보이게 한다.
+  - 케이스별 추가 단정(EXTRA_CHECKS): 위 공통 규칙으로는 잡히지 않는 회귀를 고정한다.
+  - 분할 강제 케이스(FORCED_SPLIT_CASES): 기본 chunk_size 에서 나뉘지 않는 샘플을 작은
+    chunk_size 로 다시 실행해, 분할 뒤에도 같은 단정이 성립하는지 본다.
+  - 이상 청크 검증(chunk_quality): `--only chunk_quality` 로 고를 때만 도는 별도 케이스다. 청커
+    설정에 `chunking.validation: {enable: true, action: drop}` 을 얹어(기준값은 기본값) 불량
+    섹션·레코드가 빠지고 대조군이 남는지, 전부 불량인 문서가 CHUNK_ALL_REJECTED 로 실패하는지
+    단정한다. custom_fields 경로(faq 행 청크, product_ssf 문서형 청크) 샘플도 함께 돈다.
+
+doc_type → extractor/config 매핑은 모니모 사이트 완성본(genon/sites/monimo/resource/)의
+parser_processor_config.yaml 에서 직접 읽는다. 설정이 늘어나면 이 스크립트를 고치지 않아도
+따라간다. --resource-dir 로 다른 설정 폴더를 주면 매핑과 러너 설정을 모두 그 폴더에서 읽는다.
+모델은 로컬(VPN) 프리셋(genon/sites/dev/model_presets.yaml)으로 돈다(parse_chunk_test.py 가 지정).
+
+사용:
+    python parse_chunk_verify.py                 # 전체
+    python parse_chunk_verify.py --only faq menu # 일부 doc_type 만
+    python parse_chunk_verify.py --keep          # 산출물 보존(기본은 임시 디렉터리)
+    python parse_chunk_verify.py --only chunk_quality   # 이상 청크 검증 케이스만
+    python parse_chunk_verify.py --resource-dir ../../resource   # 표준 설정으로 검증
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+# WeasyPrint 가 찾는 네이티브 라이브러리 경로. 없으면 import 가 실패해 일부 경로가 조용히
+# 달라진다. 셸 스크립트에 두면 이 파일을 직접 부르는 다른 러너(골든)가 같은 환경을 못 받으므로
+# 여기에 둔다. 이미 설정된 값이 있으면 그것을 존중한다.
+os.environ.setdefault(
+    "DYLD_FALLBACK_LIBRARY_PATH", "/opt/homebrew/lib:/usr/local/lib:/usr/lib"
+)
+# 로컬 검증은 로컬(VPN) 모델로 돈다. 하위 러너(parse_chunk_test.py)와 골든 하네스가 이 값을
+# 물려받는다. 이미 설정된 값은 존중한다.
+os.environ.setdefault(
+    "GENOS_MODEL_PRESETS_FILE",
+    str(Path(__file__).resolve().parents[3] / "sites" / "dev" / "model_presets.yaml"),
+)
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PREPROCESSOR_DIR = SCRIPT_DIR.parents[1]
+RESOURCE_DIR = PREPROCESSOR_DIR.parent / "sites" / "monimo" / "resource"
+REPO_ROOT = PREPROCESSOR_DIR.parents[1]
+SAMPLES = PREPROCESSOR_DIR / "sample_files"
+MONIMO = SAMPLES / "monimo"
+
+# (doc_type, 샘플 경로, 비고). 샘플이 없으면 SKIP 으로 처리한다.
+# parse_chunk_test.sh 의 MONIMO_CASES 와 같은 목록이며, 저장소 안에 있는 샘플만 쓴다.
+CASES = [
+    ("menu",          MONIMO / "monimo_menu_sample.xlsx",              "행 1개 = 청크 1개"),
+    ("term",          MONIMO / "monimo_term_sample.xlsx",              "행 1개 = 청크 1개"),
+    # 완전 중복 행과 일부 컬럼만 다른 대조군 행(#412). 생성 스크립트는
+    # tools/parse_chunk/make_term_duplicate_rows_sample.py 다.
+    ("term",          MONIMO / "monimo_term_duplicate_rows_sample.xlsx", "완전 중복 행 제거"),
+    ("faq",           MONIMO / "monimo_faq_json_sample.json",          "json_mapping"),
+    ("monimo_event",  SAMPLES / "json" / "monimo_event_sample.json",   "협의용 한글 키 표기"),
+    ("monimo_event",  MONIMO / "monimo_event_real_sample.json",        "실 payload 스키마"),
+    ("monimo_event",  MONIMO / "monimo_event_table_sample.json",       "5열 표 빈 셀 보존"),
+    # 제목에 영문 대문자·<BR>·엔티티가 든 생성 샘플이다(#414).
+    ("monimo_event",  MONIMO / "monimo_event_title_sample.json",       "제목 대소문자 보존"),
+    ("monimo_news",   MONIMO / "monimo_news_sample.json",              "json_mapping"),
+    ("monimo_news",   MONIMO / "TD00008415_d_5199.html.json",          "실 파일명 → BIZ_ID"),
+    ("cs_slf",        MONIMO / "monimo_cs_slf_sample.json",            "json_mapping"),
+    # 마지막 레코드는 제목에 영문 대문자·<BR>·엔티티가 든 생성 레코드다(#414).
+    ("cs_ssf",        MONIMO / "monimo_cs_ssf_sample.dtms",            "|@| 구분 레코드"),
+    # 본문이 셀 하나짜리 레이아웃 표인 레코드(#396). 실물 형식을 따라 만든 생성 샘플이다.
+    ("cs_ssf",        MONIMO / "monimo_cs_ssf_layout_table_sample.dtms", "1셀 레이아웃 표 레코드"),
+    ("cs_sss",        MONIMO / "monimo_cs_sss_sample.json",            "json_mapping"),
+    ("cs_hpp",        MONIMO / "monimo_cs_hpp_sample.html",            "llm(문서 단위)"),
+    # 파일명이 점으로 시작하고 본문이 fragment 인 실 원천(#349 재현). rename 금지.
+    ("cs_hpp",        MONIMO / ".INC_235488_02_20260626103138.html",   "section 1개"),
+    ("cs_hpp",        MONIMO / ".INC_235489_01_20260626103139.html",   "section 3개"),
+    ("cs_hpp",        MONIMO / "monimo_cs_hpp_rich_table_sample.html", "rich cell 표 + colspan 안내 셀"),
+    # JSON 레코드 원천. UD_DTM 이 "2026-08-25 16:04:41" 문자열로 온다(#455).
+    ("cs_hpp",        MONIMO / "monimo_cs_hpp_chunksize_sample.json",  "json_mapping(UD_DTM 날짜)"),
+    # 같은 원천의 마크다운 산출물. 확장자가 표준이 아니라(*.parsed) 라우팅이 그 사실을
+    # 설정/내용으로 알아내야 한다. 위 .html 과 쌍이므로 함께 둔다.
+    ("cs_hpp",        MONIMO / ".INC_235488_02_20260626103138.html.parsed",
+                                                                      "md+HTML 혼합(*.parsed)"),
+    ("product_slf",   MONIMO / "monimo_product_slf_sample.md",         "llm + markdown front matter"),
+    # front matter 값 파이프라인(values/transform/template)용 원천. 생성 스크립트는
+    # tools/parse_chunk/make_product_slf_fields_sample.py 다.
+    ("product_slf",   MONIMO / "monimo_product_slf_fields_sample.md",
+     "코드값·비표준 날짜·브랜드 분리 front matter"),
+    ("product_ssf",   MONIMO / "monimo_product_ssf_sample.md",         "llm + markdown front matter"),
+    # 본문 표를 파이프 표가 아니라 HTML <table> 로 쓴 마크다운. md 백엔드가 HTML 블록을
+    # HTML 백엔드로 왕복시켜 TableItem 으로 만드는 경로를 고정한다.
+    ("product_ssf",   MONIMO / "monimo_product_ssf_html_table_sample.md",
+     "본문 표가 HTML <table>"),
+    ("product_hpp",   MONIMO / "monimo_product_hpp_wcms_sample.json",  "json_semantic(풀 캡처)"),
+    ("product_hpp",   MONIMO / "monimo_product_hpp_sample.json",       "json_semantic(최소)"),
+    ("product_hpp",   MONIMO / "monimo_product_hpp_rich_table_sample.json",
+     "rich cell 표(연회비·적립·제휴링크)"),
+    # 값 파이프라인(values/transform/template)용 원천. 생성 스크립트는
+    # tools/parse_chunk/make_product_hpp_fields_sample.py 다.
+    ("product_hpp",   MONIMO / "monimo_product_hpp_fields_sample.json",
+     "코드값·금액문자열·브랜드 분리 필드"),
+    ("stock_insight", MONIMO / "monimo_stock_insight_sample.txt",      "구분자 텍스트 레코드"),
+    # 2026-10-01 현장 캡처 재현. 생성 스크립트는 tools/parse_chunk/make_stock_insight_split_sample.py 다.
+    ("stock_insight", MONIMO / "monimo_stock_insight_split_sample.txt",
+     "떨어진 행·등록번호 2개 병합"),
+    # 개인 작업 디렉터리(gitignore)에 있는 실 원천. 없는 머신에서는 SKIP 된다.
+    ("card",          REPO_ROOT / "shkim_labs" / "20260803_monimo" / "01_card" / "card01.flat.html",
+                                                                      "llm(카드 12필드)"),
+]
+
+
+def check_front_matter(chunks: list) -> list[str]:
+    """markdown front matter 승격/제외 회귀(#360).
+
+    front_matter 블록은 fields 에 매핑한 키(created_at 등)만 metadata 로 올리고 front matter
+    전체는 청크 텍스트에서 뺀다. front matter 만으로
+    이루어진 청크가 사라져 8청크 → 7청크가 된다. LLM 이 죽어도 이 단정은 유지된다.
+    """
+    problems = []
+    c = chunks[0]
+    if len(chunks) != 7:
+        problems.append(f"청크 7건 기대, 실제 {len(chunks)}건(front matter 청크 제거 실패)")
+    if c.get("created_date") != 20260112:
+        problems.append(f"created_at → date_int transform 실패: {c.get('created_date')!r}")
+    leaked = [i for i, x in enumerate(chunks)
+              if "conversion_note" in (x.get("text") or "") or "source_file:" in (x.get("text") or "")]
+    if leaked:
+        problems.append(f"front matter 가 청크 텍스트에 남음 {len(leaked)}/{len(chunks)}건")
+    return problems
+
+
+def check_card_annual_fee(chunks: list) -> list[str]:
+    """front matter 타입 보존은 front matter 키에만 적용된다.
+
+    card 의 annual_fee_amount 는 예전대로 문자열 '18000' 이어야 한다
+    (이미 적재된 컬렉션의 property 타입 호환).
+    """
+    got = chunks[0].get("annual_fee_amount")
+    if got != "18000":
+        return [f"annual_fee_amount 문자열 '18000' 기대, 실제 {got!r}"]
+    return []
+
+
+# table_format: html 이면 파싱된 표가 청크 본문에 `<table>` 로 다시 렌더된다.
+# 렌더 결과는 표 태그만 쓰고 속성을 싣지 않는다(병합 칸의 colspan/rowspan 만 예외). 원천 HTML 이
+# 파싱되지 않고 새어 나오면 표 밖 태그(span, div …)나 style 같은 속성이 함께 남으므로 그것으로 가른다.
+_RENDERED_TABLE_TAG = re.compile(
+    r'</?(?:table|caption|thead|tbody|tr|th|td)(?:\s+(?:colspan|rowspan)="?\d+"?)*\s*>')
+_ANY_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?>")
+
+
+def raw_markup_leak(text: str) -> str | None:
+    """렌더된 표 태그를 뺀 뒤에도 남는 HTML 태그(원천 누출)의 첫 조각. 없으면 None."""
+    hit = _ANY_TAG.search(_RENDERED_TABLE_TAG.sub(" ", text or ""))
+    return hit.group(0)[:40] if hit else None
+
+
+def check_product_hpp_table_format(chunks: list) -> list[str]:
+    """연회비 표의 행 라벨이 헤더가 아니라 각 행의 첫 칸으로 남는가(table_format: html·markdown).
+
+    연회비 표는 행 라벨이 `<th scope="row">` 인 실제 WCMS 표다. 예전에는 행 라벨 `<th>` 때문에
+    모든 행이 헤더 행으로 집계돼 계층 헤더 표로 오인됐다(table_shape.leading_header_row_count).
+    그러면 헤더 행이 반복되거나 행 라벨이 헤더 쪽으로 빠진다. 표기형태는 파서 설정의
+    `output.table_format` 을 따르므로(레코드형 문서) 두 형식 모두 같은 보장을 확인한다.
+    """
+    problems = []
+    # 표 청크만 본다 — table_as_chunk 로 표와 표 설명이 다른 청크로 갈리므로, 설명 청크가
+    # "총 연회비" 를 언급하는 것만으로 골라지면 표기형태를 엉뚱한 청크에서 검사한다.
+    texts = [c.get("text") or "" for c in chunks if c.get("has_table")]
+    fee = next((t for t in texts if "총 연회비" in t), None)
+    if fee is None:
+        return ["연회비 표가 어느 청크에도 없습니다"]
+
+    if "<table" in fee:
+        header = r">구분</th>"
+        first_cell_row = r"<tr><t[hd]>총 연회비</t[hd]><td>20,000 ?원</td>"
+    elif re.search(r"(?m)^\|(?: ?:?-+:? ?\|)+$", fee):
+        header = r"(?m)^\| 구분 \|"
+        first_cell_row = r"(?m)^\| 총 연회비 \| 20,000 ?원 \|"
+    else:
+        return ["연회비 표가 html 로도 markdown 으로도 나오지 않았습니다"]
+    # 헤더 행은 한 번만 나와야 한다(행 라벨이 헤더로 오인되면 헤더 행이 늘어난다).
+    header_count = len(re.findall(header, fee))
+    if header_count != 1:
+        problems.append(f"헤더 행 '구분' 이 {header_count}번 나왔습니다(1번 기대)")
+    # 행 라벨은 자기 행의 첫 칸으로 남고, 바로 뒤에 그 행의 값이 와야 한다.
+    if not re.search(first_cell_row, fee):
+        problems.append("행 라벨 '총 연회비' 가 첫 칸 데이터 행으로 남지 않았습니다")
+    for value in ("20,000", "18,000", "15,000", "13,000", "국내전용"):
+        if value not in fee:
+            problems.append(f"연회비 표에서 '{value}' 가 사라졌습니다")
+    return problems
+
+
+def _check_stock_insight_keeps_source_text(chunks: list) -> list[str]:
+    """세부내용의 영문 대소문자와 `<BR>` 문단 구분이 보존되어야 한다(#410).
+
+    중복 판정 키용 변환(normalize)이 걸리면 casefold 로 RSI·MACD 가 소문자가 되고 `<BR>` 이
+    공백으로 접힌다. 원천에는 소문자 rsi·macd 가 없으므로 나오면 변환이 바꾼 것이다.
+    DETAIL_DESC 는 `<BR>` 을 그대로 갖고, DETAIL_TEXT 는 그 자리를 개행으로 바꿔야 한다.
+    """
+    problems = []
+    lower = re.compile(r"(?<![A-Za-z])(?:rsi|macd)(?![A-Za-z])")
+    for idx, chunk in enumerate(chunks):
+        for field in ("DETAIL_DESC", "DETAIL_TEXT", "text"):
+            hit = lower.search(chunk.get(field) or "")
+            if hit:
+                problems.append(f"[{idx}] {field} 에서 지표 이름이 소문자로 바뀌었습니다: {hit.group()!r}")
+    if not any("RSI" in (c.get("text") or "") for c in chunks):
+        problems.append("청크 본문에 원천의 RSI 가 남지 않았습니다")
+
+    records = {(c.get("DETAIL_DESC") or "", c.get("DETAIL_TEXT") or "") for c in chunks}
+    if not any("<BR>" in desc for desc, _ in records):
+        problems.append("DETAIL_DESC 에서 원천의 <BR> 이 사라졌습니다(원본 미보관)")
+    for desc, detail_text in records:
+        # `<BR>` 바로 뒤 문장이 DETAIL_TEXT 에서 줄 첫머리로 와야 문단 구분이 살아 있는 것이다.
+        after = re.search(r"<BR>\s*([^<\"\\\s][^<\"\\]{5})", desc)
+        if after and f"\n{after.group(1)}" not in detail_text:
+            problems.append(f"DETAIL_TEXT 에서 <BR> 문단 구분이 개행으로 남지 않았습니다: {after.group(1)!r}")
+    return problems
+
+
+def _check_stock_insight_same_record_meta(chunks: list) -> list[str]:
+    """한 레코드(BIZ_ID)에서 나온 청크는 분할돼도 세부내용 원본·평문이 모두 같다(#419).
+
+    레코드가 chunk_size 를 넘으면 본문만 나뉘고 metadata 는 조각마다 레코드 전체 값으로 복사된다.
+    값이 둘 이상이면 병합이 갈렸거나 조각 값이 metadata 로 샌 것이다.
+    """
+    problems = []
+    by_biz: dict = {}
+    for chunk in chunks:
+        by_biz.setdefault(chunk.get("BIZ_ID"), []).append(chunk)
+    for biz_id, group in by_biz.items():
+        for field in ("DETAIL_DESC", "DETAIL_TEXT"):
+            values = {c.get(field) for c in group}
+            if len(values) != 1:
+                problems.append(f"{biz_id}: 청크 {len(group)}건의 {field} 가 {len(values)}종입니다")
+    return problems
+
+
+def check_stock_insight_split_per_record(chunks: list) -> list[str]:
+    """작은 chunk_size 로 돌렸을 때 모든 레코드가 실제로 둘 이상으로 나뉘었다(#419).
+
+    나뉘지 않으면 `_check_stock_insight_same_record_meta` 가 아무것도 검증하지 못한다.
+    """
+    counts: dict = {}
+    for chunk in chunks:
+        counts[chunk.get("BIZ_ID")] = counts.get(chunk.get("BIZ_ID"), 0) + 1
+    unsplit = sorted(str(biz_id) for biz_id, n in counts.items() if n < 2)
+    return [f"분할되지 않은 레코드가 있습니다: {unsplit}"] if unsplit else []
+
+
+def check_stock_insight_row_merge(chunks: list) -> list[str]:
+    """AI차트뷰 원천은 세부내용을 여러 행에 문자 단위로 잘라 보낸다.
+
+    row_merge 가 종목코드+뉴스일자 묶음을 등록번호별 게시물 라인번호 순으로 이어붙여
+    20행 → 4레코드(종목 4건)가 되어야 한다. 구분자가 끼거나 순서가 틀리면 복원되지 않는다.
+
+    detail_desc 는 **JSON·HTML·평문 중 무엇이든** 올 수 있어 스키마를 못 박을 수 없다.
+    샘플에 세 종류를 모두 넣어 `transform: to_text` 의 자동 판별을 검증한다.
+      테슬라·엔비디아 = JSON, 팔란티어 = 구조 HTML(표 포함), 리게티 = 평문
+    레코드가 chunk_size 를 넘으므로 종목당 여러 청크로 갈라지고, 조각마다 종목명 접두가
+    반복되며 분할 지점에는 직전 섹션 제목이 `(이어서)` 로 다시 붙는다.
+    """
+    problems = []
+    expected = {"테슬라", "엔비디아", "팔란티어 테크놀로지스", "리게티 컴퓨팅"}
+    stocks = {c.get("JONG_NM") for c in chunks}
+    if stocks != expected:
+        problems.append(f"종목 {len(expected)}건 기대, 실제 {sorted(stocks)}(row_merge 병합 실패)")
+    if len(chunks) <= len(stocks):
+        problems.append(f"분할이 일어나지 않았습니다: 종목 {len(stocks)}건에 청크 {len(chunks)}건")
+
+    for idx, chunk in enumerate(chunks):
+        name = chunk.get("JONG_NM")
+        text = chunk.get("text") or ""
+        # 분할 조각마다 어느 종목의 분석인지가 다시 붙어야 그 조각만 검색돼도 LLM 이
+        # 근거로 쓸 수 있다(body.repeat).
+        if not text.startswith(f"종목명: {name}\n"):
+            problems.append(f"[{idx}] 종목명 접두가 어긋납니다: {text[:60]!r}")
+        if "<BR>" in text or "<strong>" in text:
+            problems.append(f"[{idx}] 본문에 인라인 HTML 태그가 남았습니다")
+        if '{"trading_strategy"' in text:
+            problems.append(f"[{idx}] 본문에 JSON 원문이 그대로 들어갔습니다(text 변환 미적용)")
+
+    # JSON 종목: 원본이 metadata 에 JSON 그대로 남고, 본문은 마크다운 헤딩으로 펴진다.
+    tesla = [c for c in chunks if c.get("JONG_NM") == "테슬라"]
+    for idx, chunk in enumerate(tesla):
+        try:
+            json.loads(chunk.get("DETAIL_DESC") or "")
+        except (ValueError, TypeError):
+            problems.append(f"테슬라[{idx}] DETAIL_DESC 가 JSON 으로 복원되지 않았습니다")
+    if tesla and "## trading strategy" not in tesla[0]["text"]:
+        problems.append("JSON 이 마크다운 헤딩으로 펴지지 않았습니다(## trading strategy 없음)")
+
+    # 핵심 계약: 섹션이 있는 원천이면 **모든** 청크가 섹션 문맥을 갖는다. 헤딩 경계에서
+    # 잘렸으면 조각이 헤딩으로 시작하고, 섹션 하나가 chunk_size 를 넘어 중간에서 잘렸으면
+    # `(이어서)` 로 직전 제목을 물려받는다. 둘 다 아니면 "8월 17일 2544만" 같은 조각이
+    # 무엇에 대한 값인지 모르는 채로 검색에 노출된다.
+    by_stock = {}
+    for chunk in chunks:
+        by_stock.setdefault(chunk.get("JONG_NM"), []).append(chunk)
+    for name, group in by_stock.items():
+        # 종목명 접두 줄과, 첫 조각에만 붙는 세부내용 라벨을 걷어 낸 본문을 본다.
+        bodies = [re.sub(r"^세부내용:[ \n]?", "", c["text"].split("\n", 1)[-1])
+                  for c in group]
+        if not any(body.lstrip().startswith("#") for body in bodies):
+            continue                      # 헤딩이 없는 원천(평문)은 대상이 아니다
+        for idx, body in enumerate(bodies):
+            if not body.lstrip().startswith("#") and "(이어서)" not in body:
+                problems.append(
+                    f"{name}[{idx}] 조각이 섹션 문맥 없이 시작합니다: {body[:40]!r}"
+                )
+
+    # 구조 HTML 종목: 표가 셀 한 줄씩으로 뭉개지지 않고 살아 있어야 한다.
+    pltr = " ".join(c["text"] for c in chunks if c.get("JONG_NM") == "팔란티어 테크놀로지스")
+    if pltr and "36,178,448" not in pltr:
+        problems.append("HTML 표의 값이 사라졌습니다(구조 HTML 렌더링 실패)")
+
+    # 평문 종목: 그대로 실려야 한다(판별이 HTML/JSON 으로 새면 안 된다).
+    rgti = " ".join(c["text"] for c in chunks if c.get("JONG_NM") == "리게티 컴퓨팅")
+    if rgti and "20일선(17.15)" not in rgti:
+        problems.append("평문 detail_desc 가 본문에 실리지 않았습니다")
+
+    first = tesla[0] if tesla else {}
+    if first.get("ANALYSIS_DATE") != 20260827:
+        problems.append(f"ANALYSIS_DATE 20260827 기대, 실제 {first.get('ANALYSIS_DATE')!r}")
+    # TB 에 대응 컬럼이 없어 매핑하지 않는 원천 컬럼이 metadata 로 새면 안 된다.
+    leaked = sorted({"md_stck_itm_c", "kosc_stck_itm_c", "nat_c"} & set(first))
+    if leaked:
+        problems.append(f"매핑하지 않은 원천 컬럼이 metadata 에 실렸습니다: {leaked}")
+    problems += _check_stock_insight_keeps_source_text(chunks)
+    problems += _check_stock_insight_same_record_meta(chunks)
+    return problems
+
+
+
+def check_stock_insight_scattered_merge(chunks: list) -> list[str]:
+    """같은 종목코드·뉴스일자 행은 떨어져 있어도 한 레코드로 모인다(현장 캡처 재현).
+
+    테슬라는 4556 의 1~3행과 4~7행이 엔비디아를 사이에 두고 갈려 있다. 홀로그램은 4637
+    (1·2·3·5행)과 4721(4·6행)이 다른 종목 사이에 흩어져 있고, 라인번호는 등록번호마다 따로
+    매겨진다. 홀로그램은 원천에 빠진 행이 있어 JSON 으로 복원되지 않으므로 등록번호 순서만
+    본다(두 문서는 개행으로 이어진다).
+    """
+    problems = []
+    by_stock: dict = {}
+    for chunk in chunks:
+        by_stock.setdefault(chunk.get("JONG_NM"), []).append(chunk)
+    expected = {"테슬라", "엔비디아", "마이크로클라우드 홀로그램", "팔란티어 테크놀로지스",
+                "리게티 컴퓨팅", "애플"}
+    if set(by_stock) != expected:
+        problems.append(f"종목 {len(expected)}건 기대, 실제 {sorted(by_stock, key=str)}")
+
+    for name, group in by_stock.items():
+        # 한 레코드에서 나온 청크는 metadata 가 같다. 값이 둘 이상이면 레코드가 갈린 것이다.
+        descs = {c.get("DETAIL_DESC") for c in group}
+        biz_ids = {c.get("BIZ_ID") for c in group}
+        if len(descs) != 1 or len(biz_ids) != 1:
+            problems.append(f"{name}: 레코드가 {len(descs)}건으로 갈렸습니다(BIZ_ID {sorted(map(str, biz_ids))})")
+            continue
+        desc = descs.pop() or ""
+        if name == "마이크로클라우드 홀로그램":
+            first = desc.find("현재 종가 1.75는")          # 4637 1행
+            second = desc.find("반전 신호의 신뢰도가")     # 4721 6행
+            if not 0 <= first < second:
+                problems.append(f"{name}: 4637 → 4721 순서로 결합되지 않았습니다: {desc[:60]!r}")
+            # 재전송된 4637 1행은 한 번만, kosc 코드만 다른 대조군 3행은 두 번 실려야 한다(#412).
+            if desc.count("현재 종가 1.75는 5일선(1.71)을") != 1:
+                problems.append(f"{name}: 완전 중복 행(4637 1행)이 제거되지 않았습니다")
+            if desc.count("1.66까지 내려갔으나") != 2:
+                problems.append(f"{name}: 일부 컬럼만 다른 대조군 행(4637 3행)이 유지되지 않았습니다")
+            continue
+        try:
+            json.loads(desc)
+        except ValueError:
+            problems.append(f"{name}: DETAIL_DESC 가 JSON 으로 복원되지 않았습니다(조각 순서 오류)")
+    problems += _check_stock_insight_keeps_source_text(chunks)
+    problems += _check_stock_insight_same_record_meta(chunks)
+    return problems
+
+
+def check_cs_hpp_degenerate_table(chunks: list) -> list[str]:
+    """레이아웃용 표(colspan 안내 배너)는 표 표기 없이 평문으로 나간다(#360).
+
+    이 샘플의 첫 표는 `<tr><td colspan="4">해당 목차는 [AI 에이전트용] …</td></tr>` 하나뿐인
+    안내 배너다. 표로 내면 markdown 에서는 산문이 열 수만큼 복제되고 데이터 행이 0인 무효
+    표가 되며, html 에서는 태그만 얹힌다. 어느 쪽도 검색에 기여하지 않는다.
+
+    표기형태 필드에서도 같아야 한다 — 강제 markdown/html 보다 이 판정이 앞선다는 계약이다.
+    같은 문서의 정형 표 2개는 표로 남아야 한다(오탐 대조군).
+    """
+    # 배너 원문 그대로 찾는다. `[표 검색 설명]` 의 LLM 요약문도 같은 내용을 다른 문장으로
+    # 다시 말하므로, 짧은 조각으로 세면 그 요약까지 중복으로 집계된다.
+    banner = ("해당 목차는 [AI 에이전트용] 이므로, 실제 상담 시에는 세부 지침이 포함된 "
+              "[상담직원용] 컨텐츠를 활용하시기 바랍니다.")
+    problems = []
+    fields = ("text", "text_table_html", "text_table_md")
+    hit = next((c for c in chunks if banner in (c.get("text") or "")), None)
+    if hit is None:
+        return ["안내 배너 원문이 어느 청크에도 없습니다(내용 손실)"]
+
+    for field in fields:
+        value = hit.get(field) or ""
+        if banner not in value:
+            problems.append(f"{field} 에서 안내 배너가 사라졌습니다")
+            continue
+        if value.count(banner) != 1:
+            problems.append(
+                f"{field} 에 안내 배너가 {value.count(banner)}번 실렸습니다(colspan 복제)")
+        # 배너가 든 줄에 표 표기가 남아 있으면 안 된다.
+        line = next(ln for ln in value.splitlines() if banner in ln)
+        if "|" in line or "<table" in line or "<td" in line:
+            problems.append(f"{field} 의 안내 배너가 표 표기를 달고 있습니다: {line[:60]!r}")
+
+    # 대조군: 정형 표 2개는 표로 남는다(표기형태는 auto 가 정하므로 둘 다 허용).
+    tables = [c.get("text") or "" for c in chunks if c.get("has_table")]
+    kept = sum(
+        1 for t in tables
+        if "<table" in t or any(
+            re.fullmatch(r"\|(\s*:?-+:?\s*\|)+", ln.strip()) for ln in t.splitlines()))
+    if kept < 2:
+        problems.append(f"정형 표 2개가 표로 남아야 하는데 {kept}개만 남았습니다(오탐)")
+    return problems
+
+
+def check_table_text_formats(chunks: list) -> list[str]:
+    """표 표기형태별 추가 필드(#360 text_table_html / text_table_md) 공통 단정.
+
+    검증 러너가 이 기능을 켠 청커 설정(verify_chunker_config)으로 돌므로 모든 케이스가 두 필드를
+    갖는다(표준 설정은 꺼 두지만, 이 검증은 기능이 모든 경로에서 동작하는지를 지킨다). 예전에는 이 함수가
+    "필드가 없으면 기능 범위 밖" 으로 통과시켰는데, 그 폴백이 곧 이 기능이 행 기반 경로
+    (product_hpp JSON 등)에서 조용히 빠져 있던 것을 감추고 있었다. 이제 필드 부재는 실패다.
+
+    확인하는 것은 하나다: 표기형태만 다르고 담은 내용은 text 와 같아야 한다.
+    표 밖 본문이 잘려 나가거나 셀 값이 중복되면 여기서 걸린다.
+    """
+    problems = []
+    fields = ("text_table_html", "text_table_md")
+    present = [c for c in chunks if any(f in c for f in fields)]
+    if not present:
+        return ["표기형태 필드가 한 청크에도 없습니다 "
+                "(검증 설정은 table_text_formats on — 이 경로가 기능을 건너뜁니다)"]
+    if len(present) != len(chunks):
+        problems.append(
+            f"표기형태 필드가 일부 청크에만 있습니다 {len(present)}/{len(chunks)}건")
+
+    def tokens(text: str) -> list:
+        """표기형태를 지운 내용 토큰. 태그·파이프·markdown 구분선을 걷어낸다."""
+        text = re.sub(r"<[^>]+>", " ", text or "")
+        text = re.sub(r"^\s*\|[\s\-:|]+\|\s*$", " ", text, flags=re.M)
+        return [t for t in re.split(r"\s+", text.replace("|", " ")) if t]
+
+    for idx, chunk in enumerate(present):
+        base = tokens(chunk.get("text"))
+        for field in fields:
+            value = chunk.get(field)
+            if not value:
+                problems.append(f"[{idx}] {field} 가 비어 있습니다")
+                continue
+            got = tokens(value)
+            if got == base:
+                continue
+            # 병합 셀(colspan)을 markdown 으로 펴면 값이 컬럼마다 복제된다 — 손실만 문제다.
+            lost = [t for t in base if t not in got]
+            if lost:
+                problems.append(f"[{idx}] {field} 에서 내용이 사라졌습니다: {lost[:3]}")
+    return problems
+
+
+def check_table_as_chunk(chunks: list) -> list[str]:
+    """표 독립 청크(#360 table_as_chunk) 공통 단정.
+
+    표는 자기 청크를 갖는다 — 한 청크에 표가 둘 이상 실리면 그 규칙이 깨진 것이다.
+    "표 밖 문장이 없다" 로는 단정할 수 없다: 청크 접두(카드명·섹션 제목)와 `[표 검색 설명]`
+    블록은 표 청크에 함께 실려야 하는 값이다(docling 경로도 그렇게 싣는다).
+    """
+    problems = []
+    for idx, chunk in enumerate(chunks):
+        if not chunk.get("has_table"):
+            continue
+        text = chunk.get("text") or ""
+        # 검출은 여기서 단순하게 센다(이 스크립트는 facade 를 import 하지 않는다).
+        # html 표는 여는 태그 수, markdown 표는 구분선 줄 수가 곧 표 개수다.
+        count = text.lower().count("<table") + sum(
+            1 for line in text.splitlines()
+            if re.fullmatch(r"\|(\s*:?-+:?\s*\|)+", line.strip()))
+        if count > 1:
+            problems.append(f"[{idx}] 한 청크에 표가 {count}개 실렸습니다(표 독립 청크 위반)")
+    return problems
+
+
+# (doc_type, 샘플 파일명) → 추가 단정 함수
+# 마크다운 링크. 라벨 안 대괄호는 다루지 않는다 - 스킴이 있는 것만 링크로 본다.
+_MD_LINK_RE = re.compile(r"\]\(\s*(?:https?|mailto|tel):")
+
+
+def check_no_markdown_links(chunks: list) -> list[str]:
+    """청크 텍스트에 마크다운 링크 URL 이 남지 않는다(공통).
+
+    docling HTML 백엔드는 `<a href>` 를 hyperlink 로 보존하고 markdown serializer 가
+    `[라벨](URL)` 로 찍는다. URL 은 검색에 기여하지 않으면서 청크 예산만 먹으므로
+    `processing/common/markdown_export` 가 라벨만 남기고 버린다. 라벨 보존은
+    케이스별 단정(check_product_hpp_link_labels)에서 따로 본다.
+    """
+    problems = []
+    for idx, chunk in enumerate(chunks):
+        for field in ("text", "text_table_html", "text_table_md"):
+            value = chunk.get(field)
+            if not isinstance(value, str):
+                continue
+            hit = _MD_LINK_RE.search(value)
+            if hit:
+                start = max(hit.start() - 40, 0)
+                problems.append(
+                    f"청크[{idx}].{field} 에 링크 URL 이 남았습니다: "
+                    f"...{value[start:hit.end() + 10]}...")
+                break
+    return problems
+
+
+def check_product_hpp_link_labels(chunks: list) -> list[str]:
+    """URL 만 버리고 라벨은 남는다 - 링크 텍스트를 통째로 지우는 회귀를 잡는다."""
+    joined = "\n".join(c.get("text") or "" for c in chunks)
+    missing = [label for label in ("www.samsungfire.com", "www.speedmate.com", "예약하기")
+               if label not in joined]
+    if missing:
+        return [f"링크 라벨이 사라졌습니다: {missing} (URL 만 버려야 함)"]
+    return []
+
+
+def _once_field_problems(chunks: list, label: str) -> list[str]:
+    """`body.once` 계약: 라벨 붙은 값이 **첫 청크에만** 본문에 실린다.
+
+    값 자체(작성일·연회비)는 LLM 이나 원천에 따라 달라지므로 단정하지 않는다. 단정하는
+    것은 위치와 횟수뿐이다 — 모든 청크에 반복되면 chunk_size 를 깎고 같은 문장이 청크
+    수만큼 임베딩에 들어간다. 그 회귀는 값이 무엇이든 똑같이 나쁘다.
+    """
+    if not chunks:
+        return ["청크가 없어 body.once 를 확인할 수 없습니다"]
+    marker = f"{label}:"
+    carrying = [i for i, c in enumerate(chunks) if marker in (c.get("text") or "")]
+    if not carrying:
+        return [f"'{marker}' 가 어느 청크 본문에도 없습니다(body.once 미적용)"]
+    if carrying != [0]:
+        return [f"'{marker}' 가 첫 청크에만 실려야 하는데 {len(carrying)}건"
+                f"(청크 {carrying[:5]})에 실렸습니다"]
+    return []
+
+
+def check_product_attrs_once(chunks: list) -> list[str]:
+    """product_slf/ssf — front matter created_at 이 출시일로 1회만 표기된다."""
+    return _once_field_problems(chunks, "출시일")
+
+
+def check_annual_fee_once(chunks: list) -> list[str]:
+    """product_hpp — llm 이 뽑은 연회비가 첫 청크에만 1회 표기된다."""
+    return _once_field_problems(chunks, "연회비")
+
+
+def check_cs_hpp_parsed_ext(chunks: list) -> list[str]:
+    """*.parsed(마크다운+HTML 혼합 산출물)의 HTML 이 실제로 파싱되는가(#360).
+
+    이 원천은 표준 확장자를 쓰지 않는다. 예전에는 확장자 라우팅이 그것을 알아내지 못해
+    구조 없는 텍스트로 떨어졌고, 청크 본문에 `<table style=...>` 이 원문 그대로 실렸으며
+    문서 단위 enrichment 도 걸리지 않아 custom_fields 가 통째로 비었다. 실측 10청크 중
+    8청크가 태그 덩어리였다.
+    """
+    problems: list[str] = []
+    for idx, chunk in enumerate(chunks):
+        leak = raw_markup_leak(chunk.get("text"))
+        if leak:
+            problems.append(f"청크 {idx} 본문에 원천 HTML 이 그대로 남았습니다: {leak!r}")
+    if not any(chunk.get("has_table") for chunk in chunks):
+        problems.append("표로 인식된 청크가 없습니다(HTML 표가 파싱되지 않았습니다)")
+    # 마커 소제목(◈/■)이 heading 으로 승격돼야 섹션마다 청크가 갈린다. 승격이 빠지면
+    # 마커가 본문 한 줄로 남아 앞뒤가 크기로만 잘린다.
+    #
+    # 마커 글자 자체를 증거로 쓰지 않는다 — chunking.text_cleanup 의 출고 규칙이 장식
+    # 마커를 지우므로(#363) 승격은 그대로인데 이 단정만 깨진다(실측: 정제 전후 모두
+    # 11청크로 동일). 승격되면 섹션 제목이 청크 **첫 줄**로 올라오므로 그것을 센다.
+    def _starts_with_section_title(text: str) -> bool:
+        lines = (text or "").lstrip().splitlines()[:1]
+        if not lines:
+            return False
+        title = lines[0].lstrip("◈■▣ ").strip()
+        # 크기로만 잘린 청크의 첫 줄은 문단 한 줄이라 길다. 질문 접두(QUESTION)는 뺀다.
+        return 0 < len(title) <= 30 and not title.endswith("?")
+
+    section_led = sum(1 for c in chunks if _starts_with_section_title(c.get("text") or ""))
+    if section_led < 3:
+        problems.append(
+            f"섹션 제목으로 시작하는 청크가 {section_led}건뿐입니다(마커 heading 승격 미적용)"
+        )
+    return problems
+
+
+def check_md_html_table(chunks: list) -> list[str]:
+    """마크다운 본문의 HTML <table> 이 표로 파싱되고 표기형태 설정을 따르는가.
+
+    md 백엔드는 HTML 블록이 섞인 문서를 export_to_html -> HTML 백엔드로 왕복시킨다. 이
+    왕복이 끊기면 표가 TableItem 이 되지 못하고 태그가 본문에 그대로 실리거나(원문 노출)
+    표 텍스트가 통째로 사라진다. 표기형태(html/markdown)는 output.table_format 이 정하고
+    기본값 auto 는 표 구조를 보고 고르므로, 여기서는 "둘 중 하나로 정상 표기된다"만 본다.
+    두 표기 모두 metadata(text_table_html/text_table_md)에는 항상 실린다.
+    """
+    problems: list[str] = []
+    table_chunks = [c for c in chunks if c.get("has_table")]
+    if len(table_chunks) != 2:
+        problems.append(f"표 청크 2건 기대, 실제 {len(table_chunks)}건(HTML 표 파싱 실패)")
+    for idx, chunk in enumerate(table_chunks):
+        text = chunk.get("text") or ""
+        if "<table" not in text and "| - |" not in text:
+            problems.append(f"표 청크 {idx} 가 html/markdown 어느 표기도 아닙니다")
+        for field in ("text_table_html", "text_table_md"):
+            if not (chunk.get(field) or "").strip():
+                problems.append(f"표 청크 {idx} 의 '{field}' 가 비었습니다")
+    # 병합 셀 표의 값이 표기형태와 무관하게 남아 있어야 한다(왕복 중 셀 소실 회귀).
+    joined = "\n".join(c.get("text") or "" for c in chunks)
+    for cell in ("최대 3천만원", "항공기 4시간 이상 지연", "담보별 보험금 지급사유와 지급금액"):
+        if cell not in joined:
+            problems.append(f"표 내용 '{cell}' 이 청크에 없습니다")
+    return problems
+
+
+def check_cs_ssf_layout_table(chunks: list) -> list[str]:
+    """본문이 셀 하나짜리 레이아웃 표인 레코드가 평문으로 풀려 잘리는가(#396).
+
+    예전에는 풀린 평문이 버려져 markdown 표기(`| Q1… |`)를 단 채 크기로 잘렸고, 끝에
+    `| - |` 만 담긴 조각이 has_table=True 로 따로 남았다.
+    """
+    problems: list[str] = []
+    body = "\n".join(chunk.get("text") or "" for chunk in chunks)
+    if "| - |" in body or re.search(r"^\|", body, re.MULTILINE):
+        problems.append("레이아웃 표가 평문으로 풀리지 않고 markdown 표기가 남았습니다")
+    if any(chunk.get("has_table") for chunk in chunks):
+        problems.append("레이아웃 표 청크에 has_table=True 가 붙었습니다")
+    for phrase in ("Q1. 청구서류 원본이", "Q12. 보험금 청구 진행 상황은"):
+        if phrase not in body:
+            problems.append(f"본문이 유실됐습니다: {phrase!r}")
+    # 셀 안 `<p>` 마다 줄이 나뉘어야 크기 분할이 문단 경계에서 자른다. 문단이 한 줄로 합쳐지면
+    # 조각이 문장 중간(`… Q8. 합의는 언제 하는`)에서 끝난다.
+    cut = [idx for idx, chunk in enumerate(chunks)
+           if not (chunk.get("text") or "").rstrip().endswith((".", "?"))]
+    if cut:
+        problems.append(f"조각이 문장 중간에서 끝납니다: 청크 {cut}")
+    return problems
+
+
+def check_cs_ssf_delimited(chunks: list) -> list[str]:
+    """|@| 구분 원천의 분류 필드와 표가 청크까지 살아 오는가.
+
+    이 원천은 헤더가 없고 본문 HTML 이 인용 안에서 여러 줄에 걸친다. 레코드 경계 판정이
+    어긋나면 **건수는 맞는데 본문만 잘리는** 형태로 깨지므로(구분자가 없는 이어지는 줄이
+    조용히 버려진다) 건수뿐 아니라 본문 내용까지 본다.
+    """
+    problems: list[str] = []
+    if not chunks:
+        return ["청크가 없습니다"]
+
+    # 분류 4단(대분류/중분류/소분류/제목)이 청크 property 로 승격돼야 검색 필터가 걸린다.
+    if {chunk.get("GROUP_C") for chunk in chunks} != {"SSF"}:
+        problems.append("GROUP_C 가 모든 청크에 SSF 로 실리지 않았습니다")
+    categories = {chunk.get("CS_CTGR_L1") for chunk in chunks}
+    if not {"자동차", "화재", "일반"} <= categories:
+        problems.append(f"CS_CTGR_L1 이 원천 4건의 값을 담지 못했습니다: {sorted(map(str, categories))}")
+    if "누수" not in {chunk.get("CS_CTGR_L3") for chunk in chunks}:
+        problems.append("CS_CTGR_L3 이 실리지 않았습니다")
+    # 소분류가 빈 원천 1건은 default: null 로 떨어져야 한다(빈 문자열이 아니다).
+    if not any(chunk.get("CS_CTGR_L3") is None for chunk in chunks):
+        problems.append("빈 소분류가 null 로 떨어지지 않았습니다")
+
+    # 인용 안 개행으로 이어진 본문이 실제로 붙어 왔는가. 표 두 번째 행의 문구는 원천에서
+    # 첫 줄보다 한참 뒤에 있어, 경계 판정이 첫 줄에서 끊기면 사라진다.
+    body = "\n".join(chunk.get("text") or "" for chunk in chunks)
+    for phrase in ("상품 판매를 목적으로", "관리 소홀이 명백하거나"):
+        if phrase not in body:
+            problems.append(f"인용 안 개행 뒤의 본문이 유실됐습니다: {phrase!r}")
+    # 이스케이프된 따옴표("")가 원래대로 돌아왔는가.
+    if '"사고사실확인원"' not in body:
+        problems.append("이스케이프된 따옴표가 복원되지 않았습니다")
+
+    # HTML 표가 구조로 파싱됐는가(원천 태그가 본문에 그대로 남으면 실패).
+    if not any(chunk.get("has_table") for chunk in chunks):
+        problems.append("표로 인식된 청크가 없습니다")
+    leak = raw_markup_leak(body)
+    if leak:
+        problems.append(f"청크 본문에 원천 HTML 이 그대로 남았습니다: {leak!r}")
+    return problems
+
+
+def check_title_kept(*titles: str):
+    """제목(CUSTOM_TITLE)이 대소문자를 보존한 채 `<BR>`·HTML 엔티티만 풀려 실리는가(#414).
+
+    `normalize` 는 중복 판정 키를 만드는 변환이라 영문을 소문자로 바꾸고(`OTP` → `otp`)
+    연속 공백을 한 칸으로 접는다. 제목에 걸리면 청크 본문과 화면 제목이 함께 바뀐다.
+    """
+    def _check(chunks: list) -> list[str]:
+        problems: list[str] = []
+        found = {chunk.get("CUSTOM_TITLE") for chunk in chunks}
+        body = "\n".join(chunk.get("text") or "" for chunk in chunks)
+        seen = "\n".join(map(str, found)) + "\n" + body
+        for title in titles:
+            if title not in found:
+                problems.append(f"CUSTOM_TITLE 에 {title!r} 가 없습니다")
+            if title not in body:
+                problems.append(f"청크 본문에 제목 {title!r} 가 없습니다")
+            for word in re.findall(r"[A-Za-z]*[A-Z][A-Za-z]*", title):
+                if re.search(rf"(?<![A-Za-z]){word.lower()}(?![A-Za-z])", seen):
+                    problems.append(f"제목의 {word!r} 가 소문자로 바뀌었습니다")
+        return problems
+    return _check
+
+
+def check_biz_id_from_filename(expected: str):
+    """파일명 원천(`alias: [$file]`)으로 만든 BIZ_ID 가 모든 청크에 실렸는가."""
+    def _check(chunks: list) -> list[str]:
+        found = {chunk.get("BIZ_ID") for chunk in chunks}
+        return [] if found == {expected} else [f"BIZ_ID 가 {expected} 가 아닙니다: {sorted(map(str, found))}"]
+    return _check
+
+
+def check_last_mod_dt(expected: int):
+    """SRC_LAST_MOD_DT 가 정수 YYYYMMDD(값이 없으면 0)로 모든 청크에 실렸는가(#455).
+
+    문자열이나 null 이 섞이면 기간 필터·최신순 정렬에서 그 문서유형만 빠진다.
+    """
+    def _check(chunks: list) -> list[str]:
+        found = {chunk.get("SRC_LAST_MOD_DT") for chunk in chunks}
+        ok = found == {expected} and all(isinstance(v, int) for v in found)
+        return [] if ok else [f"SRC_LAST_MOD_DT 가 정수 {expected} 가 아닙니다: {sorted(map(repr, found))}"]
+    return _check
+
+
+def check_valid_period(chunks: list) -> list[str]:
+    """product_slf — front matter `sales_period: 2025-12-1 ~ 진행중` 이 시작일/열린 종료일로 나뉘었는가."""
+    found = {(chunk.get("VALID_FROM"), chunk.get("VALID_TO")) for chunk in chunks}
+    expected = {(20251201, 99991231)}
+    return [] if found == expected else [f"VALID_FROM/VALID_TO 가 {expected} 가 아닙니다: {sorted(map(str, found))}"]
+
+
+def check_term_duplicate_rows(chunks: list) -> list[str]:
+    """완전 중복 행(SLF_0001 재전송)은 한 번만, 최종수정일만 다른 대조군(HPP_0001)은 둘 다 남는다(#412)."""
+    found = sorted((str(c.get("BIZ_ID")), str(c.get("SRC_LAST_MOD_DT"))) for c in chunks)
+    expected = [("HPP_0001", "20260601"), ("HPP_0001", "20260615"), ("SLF_0001", "20260601")]
+    return [] if found == expected else [f"(BIZ_ID, 최종수정일) {expected} 기대, 실제 {found}"]
+
+
+EXTRA_CHECKS = {
+    ("term", "monimo_term_duplicate_rows_sample.xlsx"): check_term_duplicate_rows,
+    ("product_slf", "monimo_product_slf_fields_sample.md"): check_valid_period,
+    ("product_slf", "monimo_product_slf_sample.md"):
+        lambda chunks: check_front_matter(chunks) + check_product_attrs_once(chunks),
+    ("product_ssf", "monimo_product_ssf_sample.md"): check_product_attrs_once,
+    ("product_ssf", "monimo_product_ssf_html_table_sample.md"): check_md_html_table,
+    ("product_hpp", "monimo_product_hpp_sample.json"): check_annual_fee_once,
+    ("card", "card01.flat.html"): check_card_annual_fee,
+    ("product_hpp", "monimo_product_hpp_wcms_sample.json"): check_product_hpp_table_format,
+    ("cs_hpp", "monimo_cs_hpp_rich_table_sample.html"): check_cs_hpp_degenerate_table,
+    ("cs_hpp", ".INC_235488_02_20260626103138.html.parsed"): check_cs_hpp_parsed_ext,
+    ("product_hpp", "monimo_product_hpp_rich_table_sample.json"): check_product_hpp_link_labels,
+    ("stock_insight", "monimo_stock_insight_sample.txt"): check_stock_insight_row_merge,
+    ("stock_insight", "monimo_stock_insight_split_sample.txt"): check_stock_insight_scattered_merge,
+    ("cs_ssf", "monimo_cs_ssf_sample.dtms"): lambda chunks: check_cs_ssf_delimited(chunks) + check_title_kept(
+        "[보상콜] OTP 인증 오류 시 사고 접수 & 보상 안내")(chunks),
+    ("cs_slf", "monimo_cs_slf_sample.json"): check_title_kept(
+        "보험계약대출 이자 금액이 차이나는 이유가 무엇인가요? (추가대출고객,중도이자상환고객,CD/ATM 이용고객 등)",
+        "모니모 앱에서 OTP 재발급 신청 & 해지는 어떻게 하나요?"),
+    ("monimo_event", "monimo_event_title_sample.json"): check_title_kept(
+        "KB국민카드 & monimo Pay 첫 결제 최대 5만원 캐시백"),
+    ("cs_ssf", "monimo_cs_ssf_layout_table_sample.dtms"): check_cs_ssf_layout_table,
+    ("cs_ssf", "monimo_cs_ssf_sample.dtms"): check_last_mod_dt(0),
+    ("cs_sss", "monimo_cs_sss_sample.json"): check_last_mod_dt(0),
+    ("cs_hpp", "monimo_cs_hpp_chunksize_sample.json"): check_last_mod_dt(20260825),
+    ("monimo_news", "TD00008415_d_5199.html.json"): check_biz_id_from_filename("TD00008415"),
+}
+
+
+def check_no_json_parse_warning(output: str) -> list[str]:
+    """`[보상콜] …`·`[1.자동차 사고부상] …` 처럼 `[` 로 시작하는 제목을 JSON 조각으로 오판하지 않는가(#437)."""
+    n = output.count("JSON 파싱 실패")
+    return [] if n == 0 else [f"JSON 파싱 실패 경고 {n}건(기대 0건)"]
+
+
+def check_row_merge_warning_kept(output: str) -> list[str]:
+    """병합 후에도 JSON 으로 복원되지 않는 홀로그램 조각은 계속 경고하는가(#437, `{` 조각 신호 보존)."""
+    n = sum(1 for line in output.splitlines() if "JSON 파싱 실패" in line and "row_merge" in line)
+    return [] if n else ["row_merge 조각 경고가 없습니다(기대 1건 이상)"]
+
+
+# 실행 로그(stdout+stderr)에 대한 단정. 변환기 경고처럼 청크에 남지 않는 신호를 본다.
+OUTPUT_CHECKS = {
+    ("cs_ssf", "monimo_cs_ssf_sample.dtms"): check_no_json_parse_warning,
+    ("cs_ssf", "monimo_cs_ssf_layout_table_sample.dtms"): check_no_json_parse_warning,
+    ("stock_insight", "monimo_stock_insight_split_sample.txt"): check_row_merge_warning_kept,
+}
+
+# 기본 chunk_size 에서는 나뉘지 않는 샘플을 작은 chunk_size 로 한 번 더 실행한다(#419).
+# CASES 와 같은 샘플이므로 EXTRA_CHECKS 단정을 그대로 받고, 마지막 항목의 단정을 덧붙인다.
+# CASES 의 튜플 형태는 골든 하네스(parse_chunk_golden.py)가 함께 쓰므로 여기에 따로 둔다.
+# (doc_type, 샘플, chunk_size, 추가 단정, 비고)
+FORCED_SPLIT_CASES = [
+    ("stock_insight", MONIMO / "monimo_stock_insight_split_sample.txt", 200,
+     check_stock_insight_split_per_record, "떨어진 행 병합 후 분할"),
+]
+
+# 이상 청크 검증(chunking.validation) 케이스. 샘플 생성 스크립트는
+# tools/parse_chunk/make_chunk_quality_sample.py 다. custom_fields 블록이 없는 원천이라
+# CASES 와 따로 돌린다. 불량 본문 표식은 그 스크립트의 E06·E08·E10·E11 과 같다.
+QUALITY_DOC_TYPE = "chunk_quality"
+QUALITY_BAD_MARKS = ("<div></div>", "처리 중 오류가 발생했습니다", "페이지를 표시할 수 없습니다",
+                     "\uFFFD", "GLYPH")
+
+
+def check_quality_sample(chunks: list) -> list[str]:
+    """불량 섹션 본문은 없고, 대조군(N01·N03·N05·N10)과 정상 섹션은 남아 있다."""
+    text = "\n".join(c.get("text") or "" for c in chunks)
+    problems = [f"불량 본문이 남음: {mark!r}" for mark in QUALITY_BAD_MARKS if mark in text]
+    for mark in ("会員がサービス", "제2조 회원은", "가온카드", "{{ name }}", "결제일은 매월", "카드 해지는"):
+        if mark not in text:
+            problems.append(f"대조군 본문이 빠짐: {mark!r}")
+    return problems
+
+
+def check_quality_rows(chunks: list) -> list[str]:
+    """빈 행·기호 행만 빠지고 FAQ 5건이 순번대로 남는다."""
+    problems = [] if len(chunks) == 5 else [f"FAQ 5건 기대, 실제 {len(chunks)}건"]
+    if [c.get("i_chunk_on_doc") for c in chunks] != list(range(len(chunks))):
+        problems.append("순번이 0부터 이어지지 않습니다")
+    return problems
+
+
+def check_quality_text(chunks: list) -> list[str]:
+    """쪽 번호만 남은 평문 청크만 빠지고 앞뒤 문단은 순번대로 남는다."""
+    texts = [c.get("text") or "" for c in chunks]
+    problems = [] if len(texts) == 2 and not any(t.strip() == "1." for t in texts) else [
+        f"정상 문단 2건만 기대, 실제 {[t[:10] for t in texts]}"]
+    if [c.get("i_chunk_on_doc") for c in chunks] != list(range(len(chunks))):
+        problems.append("순번이 0부터 이어지지 않습니다")
+    return problems
+
+
+def check_quality_faq(chunks: list) -> list[str]:
+    """깨짐·반복 답변 레코드만 빠지고 원래 레코드와 경계 아래 대조군은 남는다."""
+    from make_chunk_quality_sample import FAQ_BAD_ANSWERS, FAQ_CONTROL_ANSWERS
+
+    text = "\n".join(c.get("text") or "" for c in chunks)
+    problems = [f"불량 레코드가 남음: {q!r}" for q, _ in FAQ_BAD_ANSWERS.values() if q in text]
+    keep = ["설정한 홈 화면을 변경하고 싶어요.", *(q for q, _ in FAQ_CONTROL_ANSWERS.values())]
+    problems += [f"대조군 레코드가 빠짐: {q!r}" for q in keep if q not in text]
+    return problems
+
+
+def check_quality_ssf(chunks: list) -> list[str]:
+    """변환에 실패한 5·6쪽만 빠지고 나머지 쪽은 남는다."""
+    text = "\n".join(c.get("text") or "" for c in chunks)
+    problems = [f"불량 쪽이 남음: {p!r}" for p in ("원문 5쪽", "원문 6쪽") if p in text]
+    problems += [f"정상 쪽이 빠짐: {p!r}" for p in ("원문 1쪽", "원문 4쪽", "원문 7쪽")
+                 if p not in text]
+    return problems
+
+
+# (doc_type, 원천, 단정, 비고). doc_type 이 있으면 설정 폴더의 custom_fields 블록을 탄다.
+QUALITY_CASES = [
+    (None, SAMPLES / "chunk_quality_sample.md", check_quality_sample, "불량 섹션 제외·대조군 보존"),
+    (None, SAMPLES / "chunk_quality_rows.json", check_quality_rows, "빈 행·기호 행 제외"),
+    (None, SAMPLES / "chunk_quality_all_bad.md", None, "전부 불량 → CHUNK_ALL_REJECTED"),
+    (None, SAMPLES / "chunk_quality_text.json", check_quality_text, "쪽 번호만 남은 평문 제외"),
+    ("faq", MONIMO / "monimo_faq_quality_sample.json", check_quality_faq, "깨짐·반복 답변 레코드 제외"),
+    ("product_ssf", MONIMO / "monimo_product_ssf_quality_sample.md", check_quality_ssf,
+     "변환 실패 쪽 제외"),
+]
+
+
+_VERIFY_CHUNKER_CONFIG: Path | None = None
+
+
+def verify_chunker_config() -> Path:
+    """검증용 청커 설정 사본. 설정 폴더의 청커 설정에 표 표기형태(#360)를 켠다.
+
+    표준·사이트 설정은 이 기능을 꺼 두지만, check_table_text_formats 는 기능이 모든 경로에서
+    동작하는지를 지키므로 켜고 돈다. 설정 파일은 건드리지 않고 임시 사본을 한 번만 만든다.
+    """
+    global _VERIFY_CHUNKER_CONFIG
+    if _VERIFY_CHUNKER_CONFIG is None:
+        cfg = yaml.safe_load(
+            (RESOURCE_DIR / "chunking_processor_config.yaml").read_text(encoding="utf-8")) or {}
+        cfg.setdefault("output", {})["table_text_formats"] = ["html", "markdown"]
+        path = Path(tempfile.mkdtemp(prefix="parse_chunk_verify_cfg_")) / "chunking_processor_config.yaml"
+        path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+        _VERIFY_CHUNKER_CONFIG = path
+    return _VERIFY_CHUNKER_CONFIG
+
+
+def quality_chunker_config(out_root: Path) -> Path:
+    """검증용 청커 설정에 drop 모드 검증을 얹은 사본. 배포 설정은 건드리지 않는다."""
+    cfg = yaml.safe_load(verify_chunker_config().read_text(encoding="utf-8")) or {}
+    cfg.setdefault("chunking", {})["validation"] = {"enable": True, "action": "drop"}
+    path = out_root / "chunk_quality_chunker_config.yaml"
+    path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def run_quality_cases(python: str, out_root: Path) -> list[tuple]:
+    """(label, 결과, 비고, 청크 수, '-') 행 목록."""
+    rows = []
+    out_dir = out_root / QUALITY_DOC_TYPE
+    out_dir.mkdir(parents=True, exist_ok=True)
+    config = quality_chunker_config(out_root)
+    for doc_type, src, check, note in QUALITY_CASES:
+        label = f"{QUALITY_DOC_TYPE}:{src.name}"
+        if not src.exists():
+            rows.append((label, "SKIP", "샘플 없음(make_chunk_quality_sample.py 실행)", "-", "-"))
+            continue
+        ok, err, output = run_case(python, doc_type, src, out_dir,
+                                   ["--chunker-config", str(config)])
+        chunks_path = out_dir / (src.stem + ".chunks.json")
+        chunks = json.loads(chunks_path.read_text(encoding="utf-8")) if chunks_path.exists() else []
+        if check is None:
+            # 실패가 기대값이다. 러너가 예외로 끝나므로 출력에서 오류 코드를 찾는다.
+            failed = "CHUNK_ALL_REJECTED" in output and not chunks
+            rows.append((label, "PASS" if failed else "FAIL",
+                         note if failed else "CHUNK_ALL_REJECTED 실패를 기대했습니다", str(len(chunks)), "-"))
+            continue
+        problems = [err] if not ok else (check(chunks) if chunks else ["청크 0건"])
+        rows.append((label, "FAIL" if problems else "PASS",
+                     "; ".join(problems) or note, str(len(chunks)), "-"))
+    return rows
+
+
+# 입력 확장자로 extractor 를 고른다. 같은 doc_type 에 블록이 둘인 경우가 있다
+# (product_hpp: md→llm / json→json_semantic).
+EXTRACTOR_BY_SUFFIX = {
+    ".xlsx": {"tabular_mapping"},
+    # 구분자 텍스트. 레코드 매핑으로 가고 실제 파싱은 source.pre.delimited 가 한다.
+    ".dtms": {"json_mapping"},
+    ".csv": {"tabular_mapping"},
+    ".json": {"json_mapping", "json_semantic"},
+    ".md": {"llm"},
+    ".html": {"llm"},
+    ".htm": {"llm"},
+}
+
+
+def load_custom_field_blocks() -> list[dict]:
+    """parser_processor_config.yaml 의 enable 된 custom_fields 블록 목록."""
+    cfg = yaml.safe_load((RESOURCE_DIR / "parser_processor_config.yaml").read_text(encoding="utf-8"))
+    out = []
+    for item in cfg.get("enrichment") or []:
+        if not isinstance(item, dict):
+            continue
+        block = item.get("custom_fields")
+        for b in (block if isinstance(block, list) else [block] if block else []):
+            if isinstance(b, dict) and b.get("enable") and b.get("doc_type"):
+                out.append(b)
+    return out
+
+
+def pick_block(blocks: list[dict], doc_type: str, suffix: str) -> dict | None:
+    cands = [b for b in blocks if b.get("doc_type") == doc_type]
+    if len(cands) <= 1:
+        return cands[0] if cands else None
+    allowed = EXTRACTOR_BY_SUFFIX.get(suffix.lower(), set())
+    narrowed = [b for b in cands if b.get("extractor") in allowed]
+    return narrowed[0] if narrowed else cands[0]
+
+
+def load_config_spec(block: dict) -> dict:
+    """블록이 가리키는 custom_field yaml 원본(없으면 빈 dict)."""
+    path = RESOURCE_DIR / str(block.get("config_file") or "")
+    if not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def expected_from_yaml(block: dict) -> tuple[list[str], dict, list[str]]:
+    """(필수 필드, 상수 필드, LLM 산출 필드)."""
+    path = RESOURCE_DIR / str(block.get("config_file") or "")
+    if not path.exists():
+        return [], {}, []
+    spec = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    required = list(spec.get("required") or spec.get("required_shared_fields") or [])
+    constants = dict(spec.get("constants") or {})
+    llm: list[str] = []
+    # llm_fields 는 블록 목록이고 각 블록이 output_fields 를 갖는다.
+    raw = spec.get("llm_fields")
+    for blk in (raw if isinstance(raw, list) else [raw] if raw else []):
+        if isinstance(blk, dict):
+            llm += list(blk.get("output_fields") or [])
+    # llm extractor(card/cs_hpp/product_*) 는 최상위 output_fields 를 쓴다.
+    if isinstance(spec.get("output_fields"), (list, dict)):
+        llm += list(spec["output_fields"])
+    return required, constants, [f for f in dict.fromkeys(llm) if isinstance(f, str)]
+
+
+def check_field_labels(chunks: list, spec: dict) -> list[str]:
+    """`field_labels` 를 선언한 필드는 청크 본문에 `항목명: 값` 으로 실린다.
+
+    라벨은 값이 한 줄일 때만 붙는다(여러 줄 블록은 자기 제목을 이미 갖는다). 그래서 검사도
+    한 줄 값에만 적용한다. metadata 에는 값이 있는데 본문에 `항목명: 값` 이 없으면 설정과
+    산출이 어긋난 것이다 — extractor 마다 라벨 규칙이 갈리던 회귀(#360)를 여기서 잡는다.
+    """
+    labels = spec.get("field_labels") or {}
+    body_fields = [f for f in (spec.get("text_fields") or []) if f in labels]
+    if not body_fields:
+        return []
+    problems = []
+    for idx, chunk in enumerate(chunks):
+        text = chunk.get("text") or ""
+        for field in body_fields:
+            value = chunk.get(field)
+            if not isinstance(value, str) or not value.strip() or "\n" in value:
+                continue
+            expected = f"{labels[field]}: {value}"
+            if expected not in text:
+                problems.append(
+                    f"[{idx}] '{field}' 가 항목명 없이 실렸습니다(기대 {expected[:40]!r})")
+                break
+    return problems
+
+
+def run_case(python: str, doc_type: str | None, src: Path, out_dir: Path,
+             extra_args: list[str] | None = None) -> tuple[bool, str, str]:
+    """parse_chunk_test.py 를 1건 실행한다.
+
+    extra_args 로 러너 인자를 덧붙일 수 있다(골든 하네스가 --llm_cache/--output-format 등을
+    넘긴다). 반환 3번째 값은 합쳐진 stdout+stderr 로, 호출자가 llm_cache 요약 같은 실행
+    사실을 읽는 데 쓴다.
+    """
+    doc_type_args = ["--doc_type", doc_type] if doc_type else []
+    # 설정은 RESOURCE_DIR 의 파서 설정과 검증용 청커 설정이다. extra_args 를 뒤에 두어 호출자가 준
+    # 인자(예: 이상 청크 검증의 --chunker-config)가 우선하게 한다.
+    config_args = ["--config", str(RESOURCE_DIR / "parser_processor_config.yaml"),
+                   "--chunker-config", str(verify_chunker_config())]
+    cmd = [python, str(SCRIPT_DIR / "parse_chunk_test.py"),
+           *doc_type_args, *config_args, *(extra_args or []), str(src), str(out_dir) + "/"]
+    proc = subprocess.run(cmd, cwd=SCRIPT_DIR, capture_output=True, text=True)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
+        return False, "실행 실패: " + " / ".join(tail), output
+    return True, "", output
+
+
+def verify(doc_type: str, src: Path, out_dir: Path, block: dict) -> list[str]:
+    """실패 사유 목록(빈 목록이면 통과)."""
+    problems: list[str] = []
+    chunks_path = out_dir / (src.stem + ".chunks.json")
+    if not chunks_path.exists():
+        return [f"산출물 없음: {chunks_path.name}"]
+    chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
+    if not chunks:
+        return ["청크 0건"]
+
+    stamped = [c for c in chunks if c.get("doc_type") == doc_type]
+    if len(stamped) != len(chunks):
+        problems.append(f"doc_type 스탬프 누락 {len(chunks)-len(stamped)}/{len(chunks)}건")
+
+    spec = load_config_spec(block)
+    required, constants, _llm = expected_from_yaml(block)
+    for field in required:
+        missing = [i for i, c in enumerate(chunks)
+                   if c.get(field) in (None, "", [], {})]
+        if missing:
+            problems.append(f"required '{field}' 비어있음 {len(missing)}/{len(chunks)}건")
+    for field, value in constants.items():
+        bad = [i for i, c in enumerate(chunks) if c.get(field) != value]
+        if bad:
+            problems.append(f"constants '{field}' 불일치 {len(bad)}/{len(chunks)}건 "
+                            f"(기대 {value!r}, 실제 {chunks[bad[0]].get(field)!r})")
+
+    problems += check_field_labels(chunks, spec)
+    problems += check_table_text_formats(chunks)
+    problems += check_no_markdown_links(chunks)
+    problems += check_table_as_chunk(chunks)
+
+    extra = EXTRA_CHECKS.get((doc_type, src.name))
+    if extra is not None:
+        problems += extra(chunks)
+    return problems
+
+
+def llm_null_rate(chunks: list, llm_fields: list[str]) -> str:
+    if not llm_fields:
+        return "-"
+    total = len(chunks) * len(llm_fields)
+    nulls = sum(1 for c in chunks for f in llm_fields if c.get(f) in (None, "", [], {}))
+    return f"{nulls}/{total}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--only", nargs="*", default=None, help="검증할 doc_type 만 지정")
+    ap.add_argument("--keep", action="store_true", help="산출물을 지우지 않는다")
+    ap.add_argument("--out", default=None, help="산출 디렉터리(미지정 시 임시 디렉터리)")
+    ap.add_argument("--python", default=sys.executable, help="parse_chunk_test.py 실행 인터프리터")
+    ap.add_argument("--resource-dir", default=None,
+                    help="설정 폴더(미지정 시 genon/sites/monimo/resource)")
+    args = ap.parse_args()
+
+    global RESOURCE_DIR
+    if args.resource_dir:
+        RESOURCE_DIR = Path(args.resource_dir).expanduser().resolve()
+
+    known_types = {case[0] for case in CASES} | {QUALITY_DOC_TYPE}
+    unknown_types = sorted(set(args.only or []) - known_types)
+    if unknown_types:
+        ap.error(f"CASES 에 등록되지 않은 doc_type: {', '.join(unknown_types)}")
+    cases = [c for c in CASES if not args.only or c[0] in args.only]
+    # 기본 실행(custom_fields 케이스)의 결과를 바꾸지 않도록 명시적으로 고를 때만 돈다.
+    run_quality = QUALITY_DOC_TYPE in (args.only or [])
+    if not cases and not run_quality:
+        ap.error("검사 대상이 0건입니다. CASES 에 doc_type 과 샘플 경로를 등록하세요.")
+
+    blocks = load_custom_field_blocks()
+    out_root = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="parse_chunk_verify_"))
+    out_root.mkdir(parents=True, exist_ok=True)
+    rows, failed, skipped = [], 0, 0
+
+    runs = [(doc_type, src, note, None, None) for doc_type, src, note in cases]
+    runs += [(doc_type, src, note, size, check)
+             for doc_type, src, size, check, note in FORCED_SPLIT_CASES
+             if not args.only or doc_type in args.only]
+    for doc_type, src, note, chunk_size, split_check in runs:
+        label = f"{doc_type}:{src.name}" + (f"@chunk_size={chunk_size}" if chunk_size else "")
+        if not src.exists():
+            rows.append((label, "SKIP", "샘플 없음", "-", "-")); skipped += 1; continue
+        block = pick_block(blocks, doc_type, src.suffix)
+        if block is None:
+            rows.append((label, "SKIP", "설정에 doc_type 없음", "-", "-")); skipped += 1; continue
+
+        # 같은 샘플을 chunk_size 만 바꿔 다시 돌리므로 산출물이 덮이지 않게 폴더를 가른다.
+        out_dir = out_root / (doc_type if chunk_size is None else f"{doc_type}_chunk{chunk_size}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        extra_args = ["--chunk-size", str(chunk_size)] if chunk_size else None
+        ok, err, output = run_case(args.python, doc_type, src, out_dir, extra_args)
+        if not ok:
+            rows.append((label, "FAIL", err, "-", "-")); failed += 1; continue
+
+        problems = verify(doc_type, src, out_dir, block)
+        # 같은 샘플을 chunk_size 만 바꿔 다시 돌리는 분할 강제 실행에는 다시 걸지 않는다.
+        output_check = OUTPUT_CHECKS.get((doc_type, src.name)) if chunk_size is None else None
+        if output_check is not None:
+            problems += output_check(output)
+        chunks_path = out_dir / (src.stem + ".chunks.json")
+        chunks = json.loads(chunks_path.read_text(encoding="utf-8")) if chunks_path.exists() else []
+        if split_check is not None and chunks:
+            problems += split_check(chunks)
+        _req, _const, llm = expected_from_yaml(block)
+        n_chunks = str(len(chunks))
+        nulls = llm_null_rate(chunks, llm)
+        if problems:
+            rows.append((label, "FAIL", "; ".join(problems), n_chunks, nulls)); failed += 1
+        else:
+            rows.append((label, "PASS", note, n_chunks, nulls))
+
+    if run_quality:
+        quality_rows = run_quality_cases(args.python, out_root)
+        rows += quality_rows
+        failed += sum(1 for r in quality_rows if r[1] == "FAIL")
+        skipped += sum(1 for r in quality_rows if r[1] == "SKIP")
+
+    width = max((len(r[0]) for r in rows), default=20)
+    print()
+    print(f"{'케이스'.ljust(width)}  {'결과':6s} {'청크':>5s} {'LLM null':>9s}  비고")
+    print("-" * (width + 40))
+    for label, status, note, n, nulls in rows:
+        print(f"{label.ljust(width)}  {status:6s} {n:>5s} {nulls:>9s}  {note}")
+    print("-" * (width + 40))
+    passed = sum(1 for r in rows if r[1] == "PASS")
+    print(f"PASS {passed} / FAIL {failed} / SKIP {skipped}   (총 {len(rows)})")
+    if not args.keep and args.out is None:
+        shutil.rmtree(out_root, ignore_errors=True)
+    else:
+        print(f"산출물: {out_root}")
+    if not passed and not failed:
+        print("FAIL: 실행된 검사가 없습니다. SKIP 사유와 샘플·설정 등록을 확인하세요.", file=sys.stderr)
+    return 1 if failed or not passed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

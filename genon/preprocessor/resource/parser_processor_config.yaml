@@ -1,6 +1,17 @@
 defaults:
   # 5=DEBUG, 4=INFO, 3=WARNING, 2=ERROR, 1=CRITICAL, 0=NOLOG
   log_level: 4
+  # 요청 doc_type 에 맞는 custom_fields 등록이 없을 때: warn(경고 후 기본 경로로 처리, 기본값) | fail(요청 실패)
+  unknown_doc_type: fail
+
+# ── 모델 프리셋 ───────────────────────────────────────────────────────────────
+# 모델·외부 서비스 접속 정보(LLM 서빙 주소·키, OCR·layout·whisper·guardrail 주소)는
+# model_presets.yaml 에 모여 있고, 쓰는 자리에서는 `model_preset: <이름>` 한 줄로 부른다.
+# 규칙과 담을 수 있는 값은 그 파일 머리말을 참고한다.
+model_presets_file: model_presets.yaml
+model_presets:
+  page:
+    timeout: 360   # PPT 페이지 설명은 오래 걸려 이 설정에서만 늘린다
 
 formats:
   # 비표준 확장자 별칭: "이 확장자는 어떤 포맷으로 볼 것인가" 를 한 줄로 지정한다.
@@ -9,6 +20,9 @@ formats:
   # 파싱용 사본을 오른쪽 확장자 이름으로 만들어 넘기므로 이후 처리는 그 포맷과 동일하다.
   extension_aliases:
     ".parsed": ".md"
+    # 고객센터(화재) 구분자 원천. 내용은 |@| 구분 텍스트지만 레코드 매핑 경로를 타야 하므로
+    # json 으로 본다(실제 파싱은 custom_field_cs_ssf.yaml 의 source.pre.delimited 가 한다).
+    ".dtms": ".json"
 
   # 엑셀(xlsx/xlsm), csv는 PDF 변환 없이 처리
   xlsx:
@@ -28,10 +42,7 @@ formats:
   ppt:
     page_description:
       enable: true
-      url: "http://llmops-gateway-api-service:8080/rep/serving/<PAGE_DESCRIPTION_SERVING_ID>/v1/chat/completions"
-      api_key: ""
-      model: "model"
-      timeout: 360
+      model_preset: page
       concurrency: 16          # 페이지 설명 요청 병렬 수
       # 선택 튜닝: images_scale(렌더 배율) / max_image_side(전송 이미지 최대 변) / max_tokens(출력 상한) / params(추가 VLM 파라미터)
       prompt_template_file: prompt_page_image_description_default.md
@@ -53,6 +64,18 @@ formats:
   md:
     processing_mode: docling
 
+# 변환 PDF: HWP/PPT/DOC/DOCX/이미지처럼 PDF 변환이 반드시 필요한 포맷에서 나온다.
+# GenOS 문서 뷰어는 이렇게 만들어진 PDF 를 참조한다.
+# (텍스트 원천(.txt/.json 등)은 PDF 를 만들지 않는다 — docling 이 직접 읽는다.)
+# 요청 파라미터 keep_pdf / pdf_dir 로 요청마다 덮어쓸 수 있다.
+pdf_output:
+  # 변환 PDF 를 남길지. false(기본)면 파싱에만 쓰고 요청이 끝날 때 지운다.
+  # 문서 뷰잉을 쓰는 현장은 true 로 켠다.
+  keep: false
+  # 변환 PDF 를 만들 폴더. 비우면(기본) 원본 파일과 같은 폴더.
+  # 원천 디렉터리에 파생물을 남기고 싶지 않으면 별도 경로를 지정한다.
+  dir: ""
+
 ocr:
   ocr_mode: "auto" # "auto"(default), "force", "disable"
 
@@ -64,8 +87,7 @@ ocr:
 
   paddle:
     # engine: "paddle" 일 때만 사용
-    # <OCR_ENDPOINT>: PaddleOCR 서버 주소로 변경 필요
-    ocr_endpoint: "http://<OCR_ENDPOINT>/ocr"
+    model_preset: ocr   # 서버 주소는 model_presets.yaml
     text_score: 0.3
 
   # 글리프 깨짐 기반 auto-OCR 재트리거 임계값
@@ -85,15 +107,12 @@ ocr:
 layout:
   layout_model_type: "genos_layout" # "genos_layout"(default) or "docling_layout"
   genos_layout:
-    # <LAYOUT_SERVING_ID>: Genos에 등록한 layout 모델서빙 ID로 변경 필요
-    # api_key는 k8s 내부 통신 기반 모델 호출 시 불필요.
-    endpoint: "http://llmops-gateway-api-service:8080/rep/serving/<LAYOUT_SERVING_ID>/v1/chat/completions"
-    api_key: ""
+    model_preset: layout   # 서빙 주소·키는 model_presets.yaml
     page_batch_size: 128
     max_completion_tokens: 16384
     model: "dots-mocr"          # 서빙 모델명
     timeout: 3600               # VLM 요청 타임아웃(초)
-    retry_count: 2              # 비정상 VLM 응답 재시도 횟수
+    retry_count: 2              # 일시적 전송 실패(502 등) 재시도 횟수. 폭주·타임아웃은 재시도 대신 폴백
     temperature: 0.1            # 생성 temperature
     top_p: 0.9                  # 생성 top_p (0<top_p<=1)
     repetition_penalty: 1.15    # >1.0, 토큰 반복(degeneration) 억제
@@ -110,21 +129,19 @@ pdf_pipeline:
 # enrichment
 # 각 항목은 {이름: {옵션}} 형식의 list.
 # 비활성화: ① 항목 삭제  ② 항목 주석 처리  ③ enable: false
-# 모든 url 의 <ENRICHMENT_SERVING_ID> 는 Genos에 등록한 모델서빙 ID로 변경 필요.
-# api_key 는 k8s 내부 통신 기반 모델 호출 시 불필요.
+# 접속 정보는 맨 위 model_presets 에 모아 두고 여기서는 `model_preset:` 으로 부른다.
+# 특정 항목만 다른 모델을 쓰려면 그 항목에 url/api_key/model 을 직접 적으면 된다(프리셋보다 우선).
 enrichment:
   - toc:
       enable: false
-      url: "http://llmops-gateway-api-service:8080/rep/serving/<ENRICHMENT_SERVING_ID>/v1/chat/completions"
-      api_key: ""
-      model: "model"
+      model_preset: default
       temperature: 0.0
       top_p: 0.00001
       seed: 33
       max_tokens: 10000
       precheck:
         enabled: true
-        max_context_tokens: 128000
+        model_context_tokens: 128000
         completion_reserved_tokens: 12000
       # 반복(degeneration) 억제. 미설정 시 미전송.
       repetition_penalty: 1.1
@@ -144,9 +161,7 @@ enrichment:
 
   - metadata:
       enable: false
-      url: "http://llmops-gateway-api-service:8080/rep/serving/<ENRICHMENT_SERVING_ID>/v1/chat/completions"
-      api_key: ""
-      model: "model"
+      model_preset: default
       max_tokens: 10000
       temperature: 0.0
       timeout: 3600
@@ -163,21 +178,17 @@ enrichment:
       user_prompt_file: prompt_metadata_default_user.md
       precheck:
         enabled: true
-        max_context_tokens: 128000
+        model_context_tokens: 128000
         completion_reserved_tokens: 12000
 
   - doc_summary:
       enable: false          # 기본 off. true 또는 런타임 doc_summary=1 로 활성화. image/table 이 공유
-      url: "http://llmops-gateway-api-service:8080/rep/serving/<ENRICHMENT_SERVING_ID>/v1/chat/completions"
-      api_key: ""
-      model: "model"
+      model_preset: default
       prompt_file: prompt_doc_summary.md   # {{full_text}} 기반 문서 본문요약
       max_chars: 6000
   - image_description:
       enable: false
-      url: "http://llmops-gateway-api-service:8080/rep/serving/<IMAGE_DESCRIPTION_SERVING_ID>/v1/chat/completions"
-      api_key: ""
-      model: "model"
+      model_preset: image
       concurrency: 16        # 이미지 설명 요청 병렬 수
       before_items: 3
       after_items: 2
@@ -190,9 +201,7 @@ enrichment:
         chart_prompt_file: prompt_chart_description_default.md
   - table_description:
       enable: false          # 기본 off(회귀 없음). true 또는 런타임 table_desc=1 로 활성화
-      url: "http://llmops-gateway-api-service:8080/rep/serving/<IMAGE_DESCRIPTION_SERVING_ID>/v1/chat/completions"
-      api_key: ""
-      model: "model"
+      model_preset: image
       concurrency: 8         # 표 설명 요청 병렬 수
       before_items: 3
       after_items: 2
@@ -210,164 +219,44 @@ enrichment:
   # 직접 만든다(권장). 그래야 custom_fields 가 LLM 을 쓰지 않는 문서유형(tabular/json 매핑)이나
   # 매칭 설정이 없는 문서에도 표 설명이 붙는다.
   # 비워 두면 예전처럼 매칭된 문서형 custom_fields YAML 의 연결을 빌려 쓴다(그 경우 위 문서들은 제외).
+  #
+  # 한 번의 호출에 표를 몇 개 담을지는 입력(model_context_tokens)과 출력(max_tokens) 중
+  # 먼저 걸리는 쪽이 정하고, 넘치면 배치를 나눠 concurrency 만큼 동시에 부른다.
+  #   출력 기준 상한 = max_tokens / ((retrieval_context_max_chars
+  #                    + key_fact_limit x key_fact_max_chars + search_terms 몫) x 1.5)
+  # 표당 산출량(아래 rag 값)을 늘리면 배치가 작아지고 호출 수가 늘어난다.
   - table_text_description:
       enable: true
-      url: "https://genos.genon.ai/api/gateway/rep/serving/752/v1/chat/completions"
-      api_key: "d1a9e0acab6243019008a96cd8af868e"
-      model: "model"
-      max_tokens: 4000
+      model_preset: default
+      model_context_tokens: 40000  # 모델 context 크기. 모델이 바뀌면 이 값만 수정
+      max_tokens: 4000        # 응답 상한. 배치당 표 개수는 이 값이 정한다. 서빙의 출력 상한(4096) 이하로 둔다
+      concurrency: 8          # 표 설명 배치 병렬 호출 수
       temperature: 0.0
-      timeout: 300
+      timeout: 600             # 배치당 생성량이 늘어난 만큼 호출 타임아웃도 올린다
       prompt_template_file: prompt_table_text_description_rag.md
       input_format: auto       # auto=HTML 원본은 html, 그 외 markdown | markdown | html
-      before_items: 3          # 표 앞쪽 본문 아이템 수
-      after_items: 2           # 표 뒤쪽 본문 아이템 수
-      max_context_chars: 1500  # 앞/뒤 문맥 각각의 최대 문자 수
-      max_context_tokens: 128000       # 프롬프트 허용 상한(토크나이저 없이 문자 수로 보수 판정)
-      completion_reserved_tokens: 8000 # 응답 생성을 위해 남겨둘 여유
+      before_items: 2          # 표 앞쪽 본문 아이템 수
+      after_items: 1           # 표 뒤쪽 본문 아이템 수
+      max_context_chars: 400   # 앞/뒤 문맥 각각의 최대 문자 수
       overflow_policy: batch   # batch=최소 추가 호출 | skip=표 설명 생략 | error=실패
       conflict_policy: prefer_text # 기존 이미지 표 설명과 충돌 시 prefer_text | prefer_image | error
       rag:
-        retrieval_context_max_chars: 350 # 모든 분할 표 청크에 반복할 독립 검색 문맥
-        key_fact_limit: 3                # 원표에서 직접 확인되는 핵심 사실 최대 개수
-        key_fact_max_chars: 160          # 핵심 사실 1개당 최대 문자 수
-        search_terms_limit: 8            # 질의 확장용 검색 표현 최대 개수
+        retrieval_context_max_chars: 250 # 모든 분할 표 청크에 반복할 독립 검색 문맥
+        key_fact_limit: 2                # 원표에서 직접 확인되는 핵심 사실 최대 개수
+        key_fact_max_chars: 120          # 핵심 사실 1개당 최대 문자 수
+        search_terms_limit: 3            # 질의 확장용 검색 표현 최대 개수
         include_search_terms: false      # true면 검색어도 청크 텍스트에 노출
         repeat_context_on_split: true    # 큰 표 분할 시 retrieval_context를 모든 조각에 반복
 
   # ── 문서유형별 custom_fields 추출 ──────────────────────────────────────────
-  # extractor=llm 은 문서 단위 LLM 추출, tabular_mapping 은 Excel/CSV 행별 직접 매핑,
-  # json_mapping 은 JSON 레코드 배열의 레코드별 직접 매핑(+ 필요 시 LLM 생성 필드).
   # doc_type(요청 kwargs)과 일치하는 설정만 동작. 배포 시 enable/serving ID 설정 후 사용.
   - custom_fields:
       enable: true
       doc_type: card
-      extractor: llm
-      config_file: custom_field_card.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-      # .json 입력 처리: 본문 텍스트(markdown/html)가 담긴 key 이름을 나열한다.
-      # 키는 JSON 임의 깊이에서 재귀 매칭되므로 pages[*].html 같은 배열 구조도 그대로 처리된다.
-      # 항목이 여러 개면 항목별 <h2> 섹션을 가진 단일 문서로 병합해 docling 을 1회 호출한다.
-      # 이 블록이 없으면 .json 은 기존 텍스트 경로로 처리된다(동작 변경 없음).
-      json:
-        text_fields: [html, summary_md]
-        format: auto             # auto(기본, 값 내용으로 판별) | html | markdown
-        missing_policy: skip     # skip(기본, 경고만) | error
-  # .json 레코드 모드: eventList[*] 처럼 레코드 배열이 오는 입력을 레코드마다 청크 1개로
-  # 만들고, 목표필드를 그 청크의 metadata 로 싣는다(xlsx 의 tabular_mapping 과 같은 성격).
-  # 위 card 의 json: 블록(문서 모드)보다 우선하며, 매칭 설정이 없으면 기존 .json 동작 그대로.
+      config_file: custom_field_card.yaml
 
-  # ── 모니모 15종 문서유형 custom_fields (2026-08-16 추가) ────────────────────
-  # 출력 필드명은 모니모 적재 스키마(TB_*)의 DB 컬럼명(대문자)을 그대로 쓴다.
-  # 공통 파일(메뉴·용어사전·FAQ·이벤트·관심소식)은 회사명 컬럼 + value_map 으로 GROUP_C 를
-  # 코드화하고, 관계사 전용 파일은 config 의 constants 로 GROUP_C 를 고정한다.
-  # 각 doc_type 의 추출항목 근거는 shkim_labs/_prompt/20260813_monimo_json.md 참고.
-  # 메뉴서비스 — 공통 xlsx 행별 매핑 (KEYWORDS/SUMMARY_TEXT 는 llm_fields 로 생성)
-  - custom_fields:
-      enable: true
-      doc_type: menu
-      extractor: tabular_mapping
-      config_file: custom_field_menu.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # 용어사전 — 공통 xlsx 행별 매핑 (TERM_NORM 은 text_norm transform, SYNONYMS 는 llm_fields)
-  - custom_fields:
-      enable: true
-      doc_type: term
-      extractor: tabular_mapping
-      config_file: custom_field_term.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # FAQ — 원천 확장자 미정이라 xlsx/json 두 경로를 같은 doc_type 으로 함께 등록한다.
-  # 파서가 확장자로 분기하므로 충돌하지 않는다. 포맷 확정 후 안 쓰는 쪽을 enable:false 로 내릴 것.
-  - custom_fields:
-      enable: true
-      doc_type: faq
-      extractor: tabular_mapping
-      config_file: custom_field_faq.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  - custom_fields:
-      enable: true
-      doc_type: faq
-      extractor: json_mapping
-      config_file: custom_field_faq_json.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # 이벤트 — JSON 레코드별 매핑. 레코드 1건 = 청크 1개, 요약본문(SUMMARY_TEXT)은 LLM 생성
-  - custom_fields:
-      enable: true
-      doc_type: monimo_event
-      extractor: json_mapping
-      config_file: custom_field_monimo_event.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # 관심소식 — 이벤트와 같은 eventList 구조. TB_NEWS 컬럼(KEYW_CTGR_NM/CN_URL/NEWS_TO)로 매핑
-  - custom_fields:
-      enable: true
-      doc_type: monimo_news
-      extractor: json_mapping
-      config_file: custom_field_monimo_news.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # 상품설명서 생명/화재 — 전처리된 MD 문서 단위 LLM 추출
-  - custom_fields:
-      enable: true
-      doc_type: product_slf
-      extractor: llm
-      config_file: custom_field_product_slf.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  - custom_fields:
-      enable: true
-      doc_type: product_ssf
-      extractor: llm
-      config_file: custom_field_product_ssf.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # 상품설명서 카드 — custom_field_card.yaml 의 TB_PRODUCT 정합 후속본
-  - custom_fields:
-      enable: true
-      doc_type: product_hpp
-      extractor: llm
-      config_file: custom_field_product_hpp.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-      # .json 입력 처리: 본문 텍스트(markdown/html)가 담긴 key 이름을 나열한다.
-      # 원천이 json 으로 확정되면 카드WCMS 실제 스키마의 본문 키로 교체할 것.
-      json:
-        text_fields: [html, summary_md]
-        format: auto             # auto(기본, 값 내용으로 판별) | html | markdown
-        missing_policy: skip     # skip(기본, 경고만) | error
-  # 삼성카드 WCMS JSON — 상품 1건(JSON 파일 1개)을 성격별 섹션(혜택 상세/상품 문서 …)으로
-  # 나눠 섹션마다 검색 청크 1건을 만든다. JSON 입력에서는 이 경로가 위 문서형 LLM 경로보다
-  # 먼저 선택된다.
-  - custom_fields:
-      enable: true
-      doc_type: product_hpp
-      extractor: json_semantic
-      config_file: custom_field_product_hpp_semantic.yaml
-  # 고객센터 생명/화재 — xlsx 행별 매핑 (원천 확장자 '미정' — 확정 시 재검토)
-  - custom_fields:
-      enable: true
-      doc_type: cs_slf
-      extractor: tabular_mapping
-      config_file: custom_field_cs_slf.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  - custom_fields:
-      enable: true
-      doc_type: cs_ssf
-      extractor: tabular_mapping
-      config_file: custom_field_cs_ssf.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # 고객센터 카드 — html 문서 단위 LLM 추출
-  - custom_fields:
-      enable: true
-      doc_type: cs_hpp
-      extractor: llm
-      config_file: custom_field_cs_hpp.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # 고객센터 증권 — JSON 레코드별 매핑
-  - custom_fields:
-      enable: true
-      doc_type: cs_sss
-      extractor: json_mapping
-      config_file: custom_field_cs_sss.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  # AI 차트뷰 — xlsx 행별 매핑. 세부내용 JSON 을 요약해 SUMMARY_TEXT 생성
-  - custom_fields:
-      enable: true
-      doc_type: stock_insight
-      extractor: tabular_mapping
-      config_file: custom_field_stock_insight.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-  - custom_fields:
-      enable: true
-      doc_type: research_report
-      extractor: llm
-      config_file: custom_field_research_report.yaml   # resource_path 자동 = 이 yaml 파일 디렉토리
-      # .json 입력 처리: 본문 텍스트(markdown/html)가 담긴 key 이름을 나열한다.
-      # 원천이 json 으로 확정되면 카드WCMS 실제 스키마의 본문 키로 교체할 것.
-      json:
-        text_fields: [html, summary_md]
-        format: auto             # auto(기본, 값 내용으로 판별) | html | markdown
-        missing_policy: skip     # skip(기본, 경고만) | error
+  # 고객사이트 전용 문서유형(예: 모니모)은 여기가 아니라 genon/sites/<site>/resource/ 에
+  # 둔다. 사이트 폴더는 그대로 배포하는 완성본이며 표준 사본은 build-script/sync-sites.sh 로 맞춘다(genon/sites/README.md 참조).
 
 output:
   format: "docling" # "json" (default), "html", "markdown", "docling"
@@ -376,25 +265,27 @@ output:
   # chunking API 가 그 결과로 청크별 라벨/마스킹을 적용한다(아래 guardrail 섹션 참고).
 
   # ── 표 표기형태 ────────────────────────────────────────────────────────────
-  # 아래 두 키는 파서가 표를 직접 문자열로 낼 때만 쓰인다.
+  # 아래 두 키는 파서가 표를 직접 문자열로 낼 때 쓰인다.
   #   1) format 이 json/html/markdown 일 때의 파싱 출력
-  #   2) custom_fields 의 `html_text`/`text` 변환
-  #      (예: monimo_event 의 DETAIL_HTML → DETAIL_TEXT). 이 파생 필드는 docling 을
-  #      거치지 않으므로 format: docling 에서도 파서가 표 모양을 확정한다.
-  # format: docling 으로 청커(/chunker)에 넘기는 구성에서는 파싱 출력의 표에 영향이 없다.
-  # 그때 청크 텍스트의 표 모양은 chunking_processor_config.yaml 의 output 이 정한다.
+  #   2) custom_fields 레코드형 문서의 표. `to_text` 변환 결과(예: monimo_event 의
+  #      DETAIL_HTML → DETAIL_TEXT)와 청크 본문의 JSON·HTML 자동 평문화가 모두 이 값을 따른다.
+  #      레코드형 문서는 파서가 청크 본문을 완성해 넘기고 청커는 표를 다시 렌더링하지 않으므로,
+  #      format: docling 이어도 이 값이 최종 청크의 표 모양이 된다.
+  # format: docling 으로 청커(/chunker)에 넘기는 일반 문서(PDF·DOCX·HTML 등)의 표 모양은
+  # chunking_processor_config.yaml 의 output 이 정한다. 최종 청크의 표 모양을 통일하려면
+  # 두 설정의 table_format 을 같은 값으로 맞춘다(precheck_custom_fields.sh 가 다르면 경고한다).
+  # 레코드형 문서의 표 모양이 바뀌면 hash 로 만든 식별자(예: cs_ssf 의 BIZ_ID)도 바뀐다.
   #
   # "auto" 는 표마다 구조를 보고 고른다 - 병합 셀이나 2단 헤더가 있으면 html,
   # 단순 격자면 markdown. markdown 은 병합 셀을 표현하지 못해 헤더 계층이 사라진다.
-  table_format: "html" # "html"(default) | "markdown" | "auto"  ("docling" 포맷에서는 무시)
+  table_format: "markdown" # "html"(default) | "markdown" | "auto"  (일반 문서의 "docling" 출력에는 무관)
   compact_tables: true # markdown 표 컬럼 정렬 패딩 제거(대형 표 축소). html/docling 포맷엔 무관.
   # 표 뒤 "컬럼=값 | 컬럼=값" 행 문장(table_row_serialization)은 청커 전용이라 여기에 없다 —
   # chunking_processor_config.yaml 의 output 에서 켠다.
 
 # whisper 설정. 음성(.wav/.mp3/.m4a) 처리 시에만 필요(선택).
-# <WHISPER_ENDPOINT>: 음성인식 모델 서버 주소로 변경 필요 (음성 미사용 시 무시)
 whisper:
-  url: "http://<WHISPER_ENDPOINT>/v1/audio/transcriptions"
+  model_preset: whisper   # 서버 주소는 model_presets.yaml
   model: "model"
   language: "ko"
   response_format: "json"
@@ -407,7 +298,5 @@ whisper:
 guardrail:
   # 민감정보 분류(#315) — parser 가 호출 주체. 요청 kwargs guardrail_call(0/1) 이면 문서 전체를 1회
   # 분류해 sensitive_infos 를 파스 출력에 실어 chunking 으로 전달(청크 라벨·마스킹 적용은 chunking).
-  url: ""                 # GenOS gateway 베이스(코드가 /workflow/{workflow_id}/run/v2 를 붙임)
-  workflow_id:            # 민감정보 분류 워크플로우 ID
-  api_key: ""             # 워크플로우 호출 Bearer 인증키(배포 환경변수/시크릿 권장)
+  model_preset: guardrail   # 접속 정보(url, workflow_id, api_key)는 model_presets.yaml
   timeout: 60             # 호출 타임아웃(초). 대용량 문서는 상향

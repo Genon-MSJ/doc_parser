@@ -11,15 +11,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from genon.preprocessor.facade.enrichment import config_schema as cs
-from genon.preprocessor.facade.enrichment.tabular_custom_fields import (
+from genon.preprocessor.processing.enrichment import config_schema as cs
+from genon.preprocessor.processing.enrichment.tabular_custom_fields import (
     TabularCustomFieldsMapper,
 )
 
 pytestmark = pytest.mark.unit
 
 _PREPROC = Path(__file__).resolve().parents[2]
-_SCRIPT = _PREPROC / "examples" / "config_precheck" / "precheck_custom_fields.py"
+_SCRIPT = _PREPROC / "tools" / "config_precheck" / "precheck_custom_fields.py"
 
 
 def _load_precheck():
@@ -31,9 +31,18 @@ def _load_precheck():
 
 
 def _bad_mapper(tmp_path):
+    """다른 extractor 의 키가 섞인 설정 — 검증 정책 스위치의 대상이다.
+
+    오타 키(`column_maps`)가 아니라 오배치 키(`raw` → 내부 `raw_fields`, JSON 원천 전용)를
+    쓴다. v2 는 최상위 오타를 normalize 단계에서 ConfigV2Error 로 막는데, 그 경로는
+    `GENOS_CUSTOM_FIELDS_VALIDATION` 이 낮출 수 있는 대상이 아니다 — 번역이 실패하면
+    쓸 설정 자체가 없기 때문이다. 정책이 실제로 갈리는 것은 extractor 지원키 대조다.
+    """
     cfg = tmp_path / "custom_field_x.yaml"
     cfg.write_text(
-        "column_maps:\n  Q: [질문]\ncolumn_map:\n  Q: [질문]\ntext_fields: [Q]\n",
+        "schema: v2\nsource: {kind: rows}\n"
+        "fields:\n  Q: {alias: [질문], raw: true}\n"
+        "body: {fields: [Q]}\n",
         encoding="utf-8",
     )
     return TabularCustomFieldsMapper(
@@ -46,7 +55,7 @@ def _bad_mapper(tmp_path):
 
 def test_default_policy_blocks_startup(tmp_path, monkeypatch):
     monkeypatch.delenv(cs.VALIDATION_POLICY_ENV, raising=False)
-    with pytest.raises(ValueError, match="column_maps"):
+    with pytest.raises(ValueError, match="raw_fields"):
         _bad_mapper(tmp_path)
 
 
@@ -55,7 +64,7 @@ def test_warn_policy_starts_and_keeps_working(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv(cs.VALIDATION_POLICY_ENV, "warn")
     with caplog.at_level("WARNING"):
         mapper = _bad_mapper(tmp_path)
-    assert "column_maps" in caplog.text
+    assert "raw_fields" in caplog.text
     rows = mapper.build_fields(
         {"data": [{"sheet_name": "S", "data_rows": [{"질문": "Q1"}]}]}, "t"
     )
@@ -75,12 +84,14 @@ def test_unknown_policy_falls_back_to_error(tmp_path, monkeypatch, value):
 def test_precheck_passes_on_shipped_resource():
     """출고 설정은 그대로 통과해야 한다(스크립트가 오탐을 내면 쓸모가 없다)."""
     precheck = _load_precheck()
-    root = _PREPROC / "resource"
+    from shipped_config import SITE_MONIMO
+
+    root = _PREPROC / SITE_MONIMO
     blocks = precheck.registered_blocks(root)
     assert len(blocks) >= 15
     seen: set = set()
-    problems = [p for source, block in blocks
-                for p in precheck.check_block(source, block, root, seen)]
+    problems = [p for source, block, presets in blocks
+                for p in precheck.check_block(source, block, root, seen, presets)]
     assert not problems, problems
 
 
@@ -92,17 +103,28 @@ def test_precheck_passes_on_shipped_resource():
         # 제거된 키
         (lambda c: c.update({"nulls": ["BIZ_ID"]}), "nulls"),
         (lambda c: c.update({"json_text_fields": {"D": "SRC"}}), "json_text_fields"),
+        # transform 은 키 대조가 아니라 컴파일 단계에서 걸린다
+        (lambda c: c["fields"]["Q"].update({"transform": {"name": "hash", "lenght": 8}}),
+         "쓸 수 없는 인자"),
+        # 생성자 검증 — 키 대조·transform 컴파일은 통과하지만 기동은 실패한다(#457)
+        (lambda c: c["fields"].update({"T": {"template": "{{Q}} {{QQ}}"}}), "참조하는"),
+        (lambda c: (c["fields"].update({"P": {"pack": ["Q"]}}), c["body"]["fields"].append("P")),
+         "pack 필드"),
+        (lambda c: c["fields"].update({"title": {"alias": ["제목"]}}), "예약 필드"),
+        (lambda c: (c.update({"source": {"kind": "html"}, "fields": {"Q": {"select": "p >>"}}}),
+                    c.pop("body")), "선택자를 해석할 수 없습니다"),
     ],
 )
 def test_precheck_detects_blocking_problems(tmp_path, mutate, expect):
     precheck = _load_precheck()
-    cfg = {"column_map": {"Q": ["질문"]}, "text_fields": ["Q"]}
+    cfg = {"schema": "v2", "source": {"kind": "rows"},
+           "fields": {"Q": {"alias": ["질문"]}}, "body": {"fields": ["Q"]}}
     mutate(cfg)
     (tmp_path / "custom_field_x.yaml").write_text(
         yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8"
     )
-    block = {"doc_type": "t", "extractor": "tabular_mapping",
-             "config_file": "custom_field_x.yaml"}
+    # extractor 는 기동처럼 source.kind 에서 유도한다(rows → tabular_mapping, html → html_select).
+    block = {"doc_type": "t", "config_file": "custom_field_x.yaml"}
     problems = precheck.check_block("cfg.yaml", block, tmp_path, set())
     assert any(expect in p and p.startswith("[기동실패]") for p in problems), problems
 
@@ -110,7 +132,8 @@ def test_precheck_detects_blocking_problems(tmp_path, mutate, expect):
 def test_precheck_detects_removed_extractor_alias(tmp_path):
     precheck = _load_precheck()
     (tmp_path / "custom_field_x.yaml").write_text(
-        "column_map:\n  Q: [질문]\ntext_fields: [Q]\n", encoding="utf-8"
+        "schema: v2\nsource: {kind: rows}\n"
+        "fields: {Q: {alias: [질문]}}\nbody: {fields: [Q]}\n", encoding="utf-8"
     )
     block = {"doc_type": "t", "extractor": "column_mapping",
              "config_file": "custom_field_x.yaml"}
@@ -132,3 +155,76 @@ def test_precheck_flags_chunk_body_change(tmp_path):
         "text_fields": ["Q", "SUMMARY_TEXT"],
         "field_labels": {"SUMMARY_TEXT": "안내요약"},
     })
+
+
+# ── 모델 프리셋 ───────────────────────────────────────────────────────────────
+
+def _write_preset_site(tmp_path, preset_ref: str) -> None:
+    """프리셋을 정의한 프로세서 config 와 그것을 참조하는 자식 설정을 쓴다."""
+    (tmp_path / "parser_processor_config.yaml").write_text(
+        "model_presets:\n"
+        "  기본:\n"
+        "    url: http://m/v1\n"
+        "    api_key: ''\n"
+        "    model: model\n"
+        "    top_p: 0.9\n"          # llm extractor 가 읽지 않는 키
+        "enrichment:\n"
+        "  - custom_fields:\n"
+        "      enable: true\n"
+        "      doc_type: demo\n"
+        "      config_file: custom_field_demo.yaml\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "custom_field_demo.yaml").write_text(
+        "schema: v2\nsource: {kind: document}\n"
+        "llm:\n- out: [name]\n"
+        f"  endpoint:\n    model_preset: {preset_ref}\n"
+        "  prompt:\n    system: x\n    user: y\n",
+        encoding="utf-8",
+    )
+
+
+def test_precheck_passes_when_preset_is_used_correctly(tmp_path):
+    """프리셋을 제대로 쓴 설정에 오탐을 내면 안 된다.
+
+    자식 설정 검증은 `model_preset:` 을 기동과 같은 순서로 펼쳐야 한다 — 안 펼치면
+    그 키가 "이 extractor 가 모르는 키" 로 잡힌다. extractor 가 안 읽는 프리셋 키
+    (`top_p`)도 걸러져서 기동을 막지 않아야 한다.
+    """
+    precheck = _load_precheck()
+    _write_preset_site(tmp_path, "기본")
+    blocks = precheck.registered_blocks(tmp_path)
+    seen: set = set()
+    problems = [p for source, block, presets in blocks
+                for p in precheck.check_block(source, block, tmp_path, seen, presets)]
+    problems += precheck.check_model_presets(tmp_path)
+    assert not [p for p in problems if p.startswith("[기동실패]")], problems
+
+
+def test_precheck_detects_undefined_preset(tmp_path):
+    """없는 프리셋 이름은 기동을 막으므로 배포 전에 잡아야 한다(자식 설정 참조 포함)."""
+    precheck = _load_precheck()
+    _write_preset_site(tmp_path, "기븐")
+    problems = precheck.check_model_presets(tmp_path)
+    blocking = [p for p in problems if p.startswith("[기동실패]")]
+    assert any("기븐" in p and "custom_field_demo.yaml" in p for p in blocking), problems
+
+
+@pytest.mark.parametrize(
+    "parser_output, chunker_output, warned",
+    [
+        ({"table_format": "markdown"}, {"table_format": "markdown"}, False),
+        ({}, {"table_format": "markdown"}, True),  # 파서는 키가 없으면 html 이다
+        ({"table_format": "html"}, {"export_to_html": 0}, True),  # 청커의 레거시 플래그
+    ],
+    ids=["same", "parser_key_missing", "chunker_legacy_flag"],
+)
+def test_precheck_warns_table_format_mismatch(tmp_path, parser_output, chunker_output, warned):
+    """레코드형 문서는 파서 값, 일반 문서는 청커 값으로 표가 나가므로 둘이 다르면 경고한다."""
+    precheck = _load_precheck()
+    (tmp_path / "parser_processor_config.yaml").write_text(
+        yaml.safe_dump({"output": parser_output}), encoding="utf-8")
+    (tmp_path / "chunking_processor_config.yaml").write_text(
+        yaml.safe_dump({"output": chunker_output}), encoding="utf-8")
+    problems = precheck.check_table_format_pairs(tmp_path)
+    assert bool(problems) is warned and all(p.startswith("[경고]") for p in problems), problems

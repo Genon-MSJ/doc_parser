@@ -1,14 +1,14 @@
 """json_records — JSON 레코드 배열 → 목표필드/청크 본문 매핑 단위 테스트.
 
 LLM 은 호출하지 않는다(llm_fields 는 선언 파싱만 확인). 실제 LLM 경로는
-examples/parse_chunk 스크립트로 확인한다.
+tools/parse_chunk 스크립트로 확인한다.
 """
 import textwrap
 
 import pytest
 
-from genon.preprocessor.facade.enrichment.field_transforms import transform_date_int_flex
-from genon.preprocessor.facade.enrichment.json_records import (
+from genon.preprocessor.processing.enrichment.field_transforms import transform_date_int_flex
+from genon.preprocessor.processing.enrichment.json_records import (
     JsonRecordsMapper,
     build_json_records_mappers,
     collect_records,
@@ -16,6 +16,8 @@ from genon.preprocessor.facade.enrichment.json_records import (
     find_fields,
     html_to_text,
 )
+from genon.preprocessor.processing.enrichment.tabular_custom_fields import TabularCustomFieldsMapper
+from shipped_config import SITE_MONIMO
 
 pytestmark = pytest.mark.unit
 
@@ -44,24 +46,34 @@ SAMPLE_PAYLOAD = {
 
 
 BASE_CONFIG = """
-records: eventList
-key_map:
-  EVENT_ID:    [ID]
-  TITLE:       [제목, title]
-  EVENT_FROM:  [이벤트 시작일]
-  EVENT_TO:    [이벤트 종료일]
-  DETAIL_HTML: [htmlText]
-  DETAIL_TEXT: [htmlText]
-required: [TITLE]
-defaults:
-  KEYWORD: null
-transforms:
-  EVENT_FROM: date_int_flex
-  EVENT_TO:   date_int_flex
-  DETAIL_TEXT: html_text
-text_fields: [TITLE, DETAIL_TEXT]
-split: true
-chunk_prefix_fields: [TITLE]
+schema: v2
+source:
+  kind: records
+  records_at: eventList
+fields:
+  EVENT_ID:
+    alias: [ID]
+  TITLE:
+    alias: [제목, title]
+  EVENT_FROM:
+    alias: [이벤트 시작일]
+    transform: date_int_flex
+  EVENT_TO:
+    alias: [이벤트 종료일]
+    transform: date_int_flex
+  DETAIL_HTML:
+    alias: [htmlText]
+  DETAIL_TEXT:
+    alias: [htmlText]
+    transform: html_text
+  KEYWORD:
+    default: null
+require:
+  fields: [TITLE]
+body:
+  fields: [TITLE, DETAIL_TEXT]
+  split: true
+  repeat: [TITLE]
 """
 
 
@@ -92,6 +104,30 @@ def test_collect_records_ignores_non_dict_items():
 def test_collect_records_without_key_uses_payload():
     assert collect_records({"a": 1}, None) == [{"a": 1}]
     assert collect_records([{"a": 1}, {"b": 2}], None) == [{"a": 1}, {"b": 2}]
+
+
+_EV1, _EV2 = SAMPLE_PAYLOAD["eventList"]
+_NO_RECORDS_AT = {"ID": "x", "tags": ["a", "b"], "emptyList": []}
+
+
+@pytest.mark.parametrize("payload, expected", [
+    ({"resultCode": "0", "eventList": [_EV1, _EV2]}, [_EV1, _EV2]),      # 감싼 배열
+    ({"data": {"body": {"eventList": [_EV1]}}}, [_EV1]),                 # 깊이 감싼 배열
+    ({"links": [{"url": "u"}], "eventList": [_EV1, _EV2]}, [_EV1, _EV2]),  # alias 로 구별
+    ({"aList": [_EV1], "bList": [_EV1]}, ValueError),                    # 구별 불가
+    ({"draft": [{"ID": "d", "제목": ""}],                                 # 빈 값은 점수에서 제외
+      "events": [{"제목": "실제 제목", "이벤트 시작일": "26.07.01"}]},
+     [{"제목": "실제 제목", "이벤트 시작일": "26.07.01"}]),
+    (_NO_RECORDS_AT, [_NO_RECORDS_AT]),                                  # 후보 없음 → 1건
+])
+def test_extract_records_without_records_at_finds_array(tmp_path, payload, expected):
+    """records_at 을 생략해도 object 안의 레코드 배열을 찾는다(#461)."""
+    mapper = write_mapper(tmp_path, BASE_CONFIG.replace("  records_at: eventList\n", ""))
+    if expected is ValueError:
+        with pytest.raises(ValueError, match="records_at"):
+            mapper.extract_records(payload)
+    else:
+        assert mapper.extract_records(payload) == expected
 
 
 def test_collect_records_returns_none_when_key_missing():
@@ -154,7 +190,10 @@ def test_date_int_flex(value, expected):
 
 
 def test_unknown_transform_is_rejected_at_startup(tmp_path):
-    config = BASE_CONFIG.replace("EVENT_FROM: date_int_flex", "EVENT_FROM: 없는변환기")
+    config = BASE_CONFIG.replace(
+        "EVENT_FROM:\n    alias: [이벤트 시작일]\n    transform: date_int_flex",
+        "EVENT_FROM:\n    alias: [이벤트 시작일]\n    transform: 없는변환기",
+    )
     with pytest.raises(ValueError, match="등록되지 않은 transforms"):
         write_mapper(tmp_path, config)
 
@@ -397,12 +436,10 @@ def test_build_fields_logs_skipped_count(tmp_path, caplog):
 
 
 def test_defaults_and_constants_apply(tmp_path):
-    config = BASE_CONFIG + textwrap.dedent("""
-        defaults:
-          KEYWORD: 기본키워드
-        constants:
-          SOURCE: monimo
-    """)
+    config = BASE_CONFIG.replace(
+        "KEYWORD:\n    default: null",
+        "KEYWORD:\n    default: 기본키워드\n  SOURCE:\n    const: monimo",
+    )
     mapper = write_mapper(tmp_path, config)
     fields = mapper.build_fields(SAMPLE_PAYLOAD, "monimo_event")[0]
     assert fields["KEYWORD"] == "기본키워드"
@@ -416,7 +453,10 @@ def test_missing_records_key_raises(tmp_path):
 
 
 def test_missing_records_key_skip_policy(tmp_path):
-    mapper = write_mapper(tmp_path, BASE_CONFIG + "missing_policy: skip\n")
+    config = BASE_CONFIG.replace(
+        "records_at: eventList", "records_at: eventList\n  on_missing: skip"
+    )
+    mapper = write_mapper(tmp_path, config)
     assert mapper.build_fields({"other": []}, "monimo_event") == []
 
 
@@ -457,8 +497,8 @@ def test_text_fields_skip_empty_values(tmp_path):
 
 def test_records_without_text_are_excluded(tmp_path, caplog):
     """본문이 빈 레코드는 element 로 내보내지 않는다(빈 text 벡터 적재 방지)."""
-    config = BASE_CONFIG.replace("text_fields: [TITLE, DETAIL_TEXT]", "text_fields: [CONTENT_HASH]")
-    config = config.replace("chunk_prefix_fields: [TITLE]\n", "")
+    config = BASE_CONFIG.replace("fields: [TITLE, DETAIL_TEXT]", "fields: [CONTENT_HASH]")
+    config = config.replace("\n  repeat: [TITLE]", "")
     mapper = write_mapper(tmp_path, config)
     fields_list = [
         {"TITLE": "요약 성공", "CONTENT_HASH": "요약본문"},
@@ -491,14 +531,20 @@ def test_wildcard_when_doc_type_unset(tmp_path):
 def test_source_reading_field_is_required(tmp_path):
     """원천 key 를 읽는 필드가 하나도 없으면 거부한다(alias 도 collect 도 없는 설정)."""
     with pytest.raises(ValueError, match="원천 key 를 읽는 필드"):
-        write_mapper(tmp_path, "records: eventList\ntext_fields: [TITLE]\n")
+        write_mapper(
+            tmp_path,
+            "schema: v2\nsource:\n  kind: records\n  records_at: eventList\n"
+            "body:\n  fields: [TITLE]\n",
+        )
 
 
 def test_collect_only_config_is_accepted(tmp_path):
     """필드가 전부 collect 여도 정상 설정이다(예전에는 key_map 이 없다고 막혔다)."""
     mapper = write_mapper(
         tmp_path,
-        "records: eventList\ncollect_key_map:\n  URLS: [serviceUrl]\ntext_fields: [URLS]\n",
+        "schema: v2\nsource:\n  kind: records\n  records_at: eventList\n"
+        "fields:\n  URLS:\n    collect: [serviceUrl]\n"
+        "body:\n  fields: [URLS]\n",
     )
     fields_list = mapper.build_fields(
         {"eventList": [{"bubble": [{"serviceUrl": "a"}, {"serviceUrl": "b"}]}]}, "monimo_event")
@@ -507,24 +553,31 @@ def test_collect_only_config_is_accepted(tmp_path):
 
 def test_text_fields_is_required(tmp_path):
     with pytest.raises(ValueError, match="text_fields"):
-        write_mapper(tmp_path, "records: eventList\nkey_map:\n  TITLE: [제목]\n")
+        write_mapper(
+            tmp_path,
+            "schema: v2\nsource:\n  kind: records\n  records_at: eventList\n"
+            "fields:\n  TITLE:\n    alias: [제목]\n",
+        )
 
 
 # ── llm_fields 선언 ─────────────────────────────────────────────────────────
 
 INLINE_LLM_CONFIG = textwrap.dedent("""
-    llm_fields:
-      - output_fields: [CONTENT_HASH]
-        input_fields: [TITLE, DETAIL_TEXT]
+    llm:
+      - out: [CONTENT_HASH]
+        in: [TITLE, DETAIL_TEXT]
         concurrency: 2
-        url: "http://llm.invalid/v1/chat/completions"
-        model: model
-        max_tokens: 500
-        system_prompt: "너는 요약 전문가다."
-        user_prompt: |
-          <event>
-          {{raw_text}}
-          </event>
+        endpoint:
+          url: "http://llm.invalid/v1/chat/completions"
+          model: model
+        params:
+          max_tokens: 500
+        prompt:
+          system: "너는 요약 전문가다."
+          user: |
+            <event>
+            {{raw_text}}
+            </event>
 """)
 
 
@@ -553,7 +606,7 @@ def test_llm_field_enricher_kwargs_passthrough(tmp_path):
 
 def test_llm_field_inline_config_builds_real_enricher(tmp_path):
     """인라인 설정만으로 실제 CustomFieldsEnricher 가 만들어진다(LLM 호출은 하지 않음)."""
-    from genon.preprocessor.facade.enrichment.custom_fields_enricher import CustomFieldsEnricher
+    from genon.preprocessor.processing.enrichment.custom_fields_enricher import CustomFieldsEnricher
 
     spec = write_mapper(tmp_path, BASE_CONFIG + INLINE_LLM_CONFIG).llm_field_specs[0]
     enricher = CustomFieldsEnricher(resource_path=str(tmp_path), **spec.enricher_kwargs)
@@ -567,10 +620,10 @@ def test_llm_field_inline_config_builds_real_enricher(tmp_path):
 def test_llm_field_config_file_still_supported(tmp_path):
     """프롬프트를 파일로 뺀 기존 방식(경로 A 스타일)도 그대로 동작한다."""
     config = BASE_CONFIG + textwrap.dedent("""
-        llm_fields:
-          - config_file: custom_field_summary.yaml
-            output_fields: [CONTENT_HASH]
-            input_fields: [DETAIL_TEXT]
+        llm:
+          - out: [CONTENT_HASH]
+            in: [DETAIL_TEXT]
+            config_file: custom_field_summary.yaml
     """)
     spec = write_mapper(tmp_path, config).llm_field_specs[0]
     assert spec.enricher_kwargs["config_file"] == "custom_field_summary.yaml"
@@ -582,9 +635,9 @@ def test_llm_field_config_file_still_supported(tmp_path):
 def test_llm_field_requires_config_file_or_url(tmp_path):
     """연결 정보가 아예 없는 설정은 기동 시에 잡는다."""
     config = BASE_CONFIG + textwrap.dedent("""
-        llm_fields:
-          - output_fields: [CONTENT_HASH]
-            input_fields: [TITLE]
+        llm:
+          - out: [CONTENT_HASH]
+            in: [TITLE]
     """)
     with pytest.raises(ValueError, match="config_file 또는 url"):
         write_mapper(tmp_path, config)
@@ -612,7 +665,7 @@ def test_builder_selects_only_json_mapping_configs(tmp_path):
 
 # ── 출고 설정 파일 자체 검증 ─────────────────────────────────────────────────
 
-@pytest.mark.parametrize("resource_dir", ["resource", "resource_dev"])
+@pytest.mark.parametrize("resource_dir", [SITE_MONIMO])
 def test_shipped_monimo_event_config_loads(resource_dir):
     """출고 yaml 이 실제로 매퍼로 컴파일되는지(오타/키 누락 방지)."""
     from pathlib import Path
@@ -627,12 +680,12 @@ def test_shipped_monimo_event_config_loads(resource_dir):
     assert mapper.records_key == "eventList"
     # LLM 요약 설정이 비활성화된 현재 출고 설정은 평문화한 상세 원문을 검색 본문으로 쓴다.
     # TB_* 의 CONTENT_HASH 는 RAW(32) 원문 검증 해시이므로 임베딩 입력이 아니다.
-    assert mapper.text_fields == ["TITLE", "DETAIL_TEXT"]
-    assert mapper.chunk_prefix_fields == ["TITLE"]
+    assert mapper.text_fields == ["CUSTOM_TITLE", "DETAIL_TEXT"]
+    assert mapper.chunk_prefix_fields == ["CUSTOM_TITLE"]
     assert "CONTENT_HASH" not in mapper.key_map
 
     # llm_fields 는 모델서빙이 배정되기 전까지 주석으로 내려둘 수 있다(현재 resource/ 가 그 상태).
-    # 그때는 SUMMARY_TEXT 가 비고 text_fields 의 TITLE 만 본문에 남는다 — yaml 주석이 그 상황을
+    # 그때는 SUMMARY_TEXT 가 비고 text_fields 의 CUSTOM_TITLE 만 본문에 남는다 — yaml 주석이 그 상황을
     # 전제로 제목을 앞에 두고 있고, 로더도 경고만 남기고 통과한다
     # (test_custom_fields_routing.test_unproducible_text_field_warns_but_loads).
     # 선언되어 있다면 자족해야 한다 — LLM 연결·프롬프트가 이 파일 안에 인라인되어 있고
@@ -648,12 +701,12 @@ def test_shipped_monimo_event_config_loads(resource_dir):
         assert "CONTENT_HASH" not in spec.enricher_kwargs["system_prompt"]
 
 
-@pytest.mark.parametrize("resource_dir", ["resource", "resource_dev"])
+@pytest.mark.parametrize("resource_dir", [SITE_MONIMO])
 def test_shipped_monimo_event_config_maps_real_payload_schema(resource_dir):
     """출고 yaml 이 실 payload(영문 camelCase 키) 스키마를 매핑하는지.
 
     원천 화면에서 확인한 키(cmpId / evtTodayMainCopy / evtHeaderTopTitle / evtPtrmStrtDt …)는
-    협의용 한글 키와 표기가 다르고 회사명 필드가 없다. 별칭이 빠지면 TITLE 이 null 이 되어
+    협의용 한글 키와 표기가 다르고 회사명 필드가 없다. 별칭이 빠지면 CUSTOM_TITLE 이 null 이 되어
     전 레코드가 조용히 skip 되므로(그러면 청크 0건) 여기서 고정한다.
     샘플 파일을 그대로 읽어 config 와 픽스처가 따로 흘러가지 않게 한다.
     """
@@ -673,17 +726,17 @@ def test_shipped_monimo_event_config_maps_real_payload_schema(resource_dir):
 
     fields_list = mapper.build_fields(payload, "monimo_event")
 
-    # 3번째 레코드는 어느 설정에서든 제목 계열 키가 없어 required(TITLE) 로 skip 된다.
+    # 3번째 레코드는 어느 설정에서든 제목 계열 키가 없어 required(CUSTOM_TITLE) 로 skip 된다.
     # 2번째는 evtTodayMainCopy 가 없어 evtHeaderTopTitle 별칭이 있어야 잡힌다 — 그 별칭을
     # 선언하지 않은 설정에서는 함께 skip 되는 것이 설정대로의 동작이므로 기대값을 설정에서 뽑는다.
     has_header_fallback = bool(
-        set(mapper.key_map["TITLE"]) & {"evtHeaderTopTitle", "evtHeaderTitle"}
+        set(mapper.key_map["CUSTOM_TITLE"]) & {"evtHeaderTopTitle", "evtHeaderTitle"}
     )
     assert len(fields_list) == (2 if has_header_fallback else 1)
 
     first = fields_list[0]
     # BIZ_ID 별칭은 사이트 운영 설정(커밋 263f53ea)이 cmpCntsId 로 바꿨다. 실 payload 에는
-    # 그 키가 없어 값이 비는데, 어느 원천 키를 업무키로 쓸지는 설정의 소관이므로 위 TITLE
+    # 그 키가 없어 값이 비는데, 어느 원천 키를 업무키로 쓸지는 설정의 소관이므로 위 CUSTOM_TITLE
     # 별칭과 같은 방식으로 기대값을 설정에서 뽑는다.
     src_record = next(v for v in payload.values() if isinstance(v, list))[0]
     biz_expected = next(
@@ -692,7 +745,7 @@ def test_shipped_monimo_event_config_maps_real_payload_schema(resource_dir):
         None,
     )
     assert first["BIZ_ID"] == biz_expected
-    assert first["TITLE"] == "하이마트 구독을 가볍게 매월 최대2만원 까지 혜택"   # evtTodayMainCopy 우선
+    assert first["CUSTOM_TITLE"] == "하이마트 구독을 가볍게 매월 최대2만원 까지 혜택"   # evtTodayMainCopy 우선
     assert first["EVENT_FROM"] == 20260710                 # evtPtrmStrtDt (8자리 압축)
     assert first["EVENT_TO"] == 20261111                   # evtPtrmEndDt
     # 실 payload 에 회사명이 없어도 defaults→value_map 으로 표준 코드가 채워진다.
@@ -712,7 +765,7 @@ def test_shipped_monimo_event_config_maps_real_payload_schema(resource_dir):
     # evtTodayMainCopy 가 없으면 evtHeaderTopTitle 로 내려가고, 시작일이 없으면 0 이다.
     if has_header_fallback:
         second = fields_list[1]
-        assert second["TITLE"] == "여름 휴가 주유 캐시백"
+        assert second["CUSTOM_TITLE"] == "여름 휴가 주유 캐시백"
         assert second["EVENT_FROM"] == 0
         assert second["EVENT_TO"] == 20260831
 
@@ -732,6 +785,7 @@ def test_shipped_monimo_event_config_maps_real_payload_schema(resource_dir):
     ("202699", 20260101),        # 날짜가 아니면 압축 표기로 보지 않고 기존 경로(연도만)
     ("", 0),
     (None, 0),
+    (True, 0),                   # bool 은 int 의 하위형이지만 날짜가 아니다
 ])
 def test_date_int_flex_handles_compact_forms(raw, expected):
     assert transform_date_int_flex(raw) == expected
@@ -740,21 +794,26 @@ def test_date_int_flex_handles_compact_forms(raw, expected):
 # ── 설정 형 오류 진단(검증 순서) ────────────────────────────────────────────
 
 def test_shape_error_reports_key_name_before_consumption(tmp_path):
-    """`transforms` 를 맵이 아닌 값으로 쓰면 키 이름과 파일명이 담긴 ValueError 가 나야 한다.
+    """키를 아는데 값의 형태가 틀리면, 소비 전에 파일명·키 이름과 함께 보고돼야 한다.
 
-    검증을 키 소비 뒤로 미루면 `'list' object has no attribute 'items'` 라는
-    AttributeError 가 먼저 나서 어느 파일 어느 키가 틀렸는지 알 수 없었다(tabular 와 순서 불일치).
+    v1 에서는 `transforms` 에 맵 대신 리스트를 얹으면 검증이 키 소비 뒤로 밀려
+    `'list' object has no attribute 'items'` 라는 AttributeError 가 먼저 났고, 어느 파일
+    어느 키가 틀렸는지 알 수 없었다(tabular 와 순서 불일치). v2 에서 같은 실수에 해당하는
+    것은 필드 스펙에 dict 대신 단축 표기를 쓰는 것이다 — 값을 빠뜨린 오타가 조용히
+    통과하지 않도록 normalize 가 소비보다 먼저 막는다.
     """
     with pytest.raises(ValueError) as exc:
         write_mapper(tmp_path, """
-            key_map:
+            schema: v2
+            source:
+              kind: records
+            fields:
               TITLE: [title]
-            text_fields: [TITLE]
-            transforms:
-              - date_int_flex
+            body:
+              fields: [TITLE]
         """)
     message = str(exc.value)
-    assert "transforms" in message
+    assert "fields.TITLE" in message
     assert "custom_field_json.yaml" in message
 
 
@@ -768,19 +827,26 @@ def test_row_merge_folds_split_records_before_value_pipeline(tmp_path):
     """
     whole = '{"종목명": "삼성전자", "투자의견": "매수"}'
     mapper = write_mapper(tmp_path, """
-        key_map:
-          REGT_NO:     [regtNo]
-          LINE_NO:     [lineNo]
-          DETAIL_JSON: [detailDesc]
-          DETAIL_TEXT: [detailDesc]
-        row_merge:
-          group_by:  [REGT_NO]
-          order_by:  LINE_NO
-          concat:    [DETAIL_JSON, DETAIL_TEXT]
-          separator: ""
-        transforms:
-          DETAIL_TEXT: text
-        text_fields: [DETAIL_TEXT]
+        schema: v2
+        source:
+          kind: records
+          merge_rows:
+            group_by:  [REGT_NO]
+            order_by:  LINE_NO
+            concat:    [DETAIL_JSON, DETAIL_TEXT]
+            separator: ""
+        fields:
+          REGT_NO:
+            alias: [regtNo]
+          LINE_NO:
+            alias: [lineNo]
+          DETAIL_JSON:
+            alias: [detailDesc]
+          DETAIL_TEXT:
+            alias: [detailDesc]
+            transform: text
+        body:
+          fields: [DETAIL_TEXT]
     """, doc_type="stock")
     rows = mapper.build_fields([
         {"regtNo": "R1", "lineNo": 1, "detailDesc": whole[:12]},
@@ -794,20 +860,89 @@ def test_row_merge_folds_split_records_before_value_pipeline(tmp_path):
     assert "SK하이닉스" in str(rows[1]["DETAIL_JSON"])
 
 
-def test_row_merge_only_folds_consecutive_runs(tmp_path):
-    """떨어진 동일 키는 합치지 않는다 — 등록번호 재사용 시 다른 건이 뭉개지는 것을 막는다."""
+def test_row_merge_folds_scattered_keys(tmp_path):
+    """떨어진 동일 키도 한 레코드로 모으고, 첫 등장 자리에 둔다."""
     mapper = write_mapper(tmp_path, """
-        key_map:
-          REGT_NO: [regtNo]
-          BODY:    [body]
-        row_merge:
-          group_by: [REGT_NO]
-          concat:   [BODY]
-        text_fields: [BODY]
+        schema: v2
+        source:
+          kind: records
+          merge_rows:
+            group_by: [REGT_NO]
+            concat:   [BODY]
+        fields:
+          REGT_NO:
+            alias: [regtNo]
+          BODY:
+            alias: [body]
+        body:
+          fields: [BODY]
     """, doc_type="stock")
     rows = mapper.build_fields([
         {"regtNo": "R1", "body": "a"},
         {"regtNo": "R2", "body": "b"},
         {"regtNo": "R1", "body": "c"},
     ], "stock")
-    assert [r["BODY"] for r in rows] == ["a", "b", "c"]
+    assert [r["BODY"] for r in rows] == ["ac", "b"]
+
+
+def test_row_merge_accepts_array_valued_key(tmp_path):
+    """JSON 레코드의 배열 값도 묶음 키가 된다(dict 키로 쓰다 TypeError 가 나던 회귀)."""
+    mapper = write_mapper(tmp_path, """
+        schema: v2
+        source:
+          kind: records
+          merge_rows:
+            group_by: [TAGS]
+            part_by:  TAGS
+            concat:   [BODY]
+        fields:
+          TAGS:
+            alias: [tags]
+          BODY:
+            alias: [body]
+        body:
+          fields: [BODY]
+    """, doc_type="stock")
+    rows = mapper.build_fields([
+        {"tags": ["A"], "body": "a"},
+        {"tags": ["B"], "body": "b"},
+        {"tags": ["A"], "body": "c"},
+    ], "stock")
+    assert [r["BODY"] for r in rows] == ["ac", "b"]
+
+
+@pytest.mark.parametrize("kind", ["rows", "records"])
+def test_exact_duplicate_rows_are_dropped_before_mapping(tmp_path, kind):
+    """원본 행 전체가 같은 것만 빠진다. 키 순서는 무시하고, 일부 컬럼만 다른 행은 남는다.
+
+    매핑되지 않는 컬럼(tags)만 다른 행도 원본이 다르므로 유지한다. 객체 값이 섞여도 실패하지 않는다.
+    """
+    config = f"""
+        schema: v2
+        source:
+          kind: {kind}
+        fields:
+          ID:
+            alias: [id]
+          BODY:
+            alias: [body]
+        body:
+          fields: [BODY]
+    """
+    source = [
+        {"id": "A", "body": "x", "tags": {"k": [1]}},
+        {"id": "A", "body": "y", "tags": {"k": [1]}},
+        {"tags": {"k": [1]}, "body": "x", "id": "A"},
+        {"id": "A", "body": "x", "tags": {"k": [2]}},
+    ]
+    if kind == "rows":
+        path = tmp_path / "custom_field_rows.yaml"
+        path.write_text(textwrap.dedent(config), encoding="utf-8")
+        mapper = TabularCustomFieldsMapper(
+            doc_type="dup", extractor="tabular_mapping",
+            config_file=path.name, resource_path=str(tmp_path),
+        )
+        rows = mapper.build_fields({"data": [{"sheet_name": "S", "data_rows": source}]}, "dup")
+    else:
+        rows = write_mapper(tmp_path, config, doc_type="dup").build_fields(source, "dup")
+    assert [r["BODY"] for r in rows] == ["x", "y", "x"]

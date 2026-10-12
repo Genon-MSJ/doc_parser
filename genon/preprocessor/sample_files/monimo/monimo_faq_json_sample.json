@@ -1,5 +1,5 @@
 {
-  "_note": "parser .json 레코드 모드 + doc_type=faq. custom_field_faq_json.yaml(records: faqMenuList) 검증용. 같은 doc_type=faq 가 확장자에 따라 xlsx(tabular_mapping)/json(json_mapping)으로 갈리는지 확인한다.",
+  "_note": "doc_type=faq 원천 샘플(json). 레코드는 `faqMenuList` 아래에 있고 custom_field_faq.yaml 이 records 모드로 읽는다.",
   "faqMenuList": [
     {
       "depth1": "더보기",

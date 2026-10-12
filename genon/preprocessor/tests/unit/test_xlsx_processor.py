@@ -8,6 +8,7 @@ mock 없이 실제 추출 경로를 호출한다. docling/facade 의존성 미�
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ _CONFIG = _PREPROC / "resource" / "intelligent_processor_config.yaml"
 
 def _xp():
     """헬퍼 모듈 로드(openpyxl 등 미가용 시 skip)."""
-    return pytest.importorskip("genon.preprocessor.converters.xlsx_processor")
+    return pytest.importorskip("genon.preprocessor.processing.converters.xlsx_processor")
 
 
 def _make_xlsx(path: Path, rows, merges=None, sheet_name="Sheet1"):
@@ -626,6 +627,8 @@ def _make_e2e_config(tmp_path: Path, processing_mode: str) -> str:
     cfg.setdefault("formats", {}).setdefault("xlsx", {})["processing_mode"] = processing_mode
     out = tmp_path / "intelligent_processor_config.yaml"
     out.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    # 메인 설정이 `model_presets_file` 로 같은 폴더의 프리셋 파일을 읽으므로 함께 옮긴다.
+    shutil.copy(_CONFIG.parent / "model_presets.yaml", tmp_path)
     return str(out)
 
 
@@ -664,10 +667,13 @@ async def test_parser_xlsx_docling_mode_runs_post_enrichment(tmp_path):
     mod = pytest.importorskip("facade.parser_processor")
     cfg = yaml.safe_load(_PARSER_CONFIG.read_text(encoding="utf-8"))
     cfg["enrichment"] = []  # 네트워크/LLM 호출 차단
+    # 등록을 비웠으므로 doc_type=card 가 미등록이 된다. 이 테스트는 스탬프만 보므로 warn 으로 둔다.
+    cfg.setdefault("defaults", {})["unknown_doc_type"] = "warn"
     cfg.setdefault("formats", {}).setdefault("xlsx", {})["processing_mode"] = "docling"
     cfg.setdefault("output", {})["format"] = "json"
     out = tmp_path / "parser_processor_config.yaml"
     out.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    shutil.copy(_PARSER_CONFIG.parent / "model_presets.yaml", tmp_path)
     try:
         dp = mod.DocumentProcessor(config_path=str(out))
     except Exception as e:  # noqa: BLE001 - 모델/네트워크 등 환경 의존

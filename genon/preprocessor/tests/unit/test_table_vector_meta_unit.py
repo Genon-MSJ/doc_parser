@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from genon.preprocessor.facade.common.vector_meta import VectorMetaBuilderBase
+from genon.preprocessor.processing.common.vector_meta import VectorMetaBuilderBase
 
 
 class _Builder(VectorMetaBuilderBase):
@@ -77,9 +77,22 @@ def test_missing_split_totals_still_fills_refs():
     assert builder.table_split_total == -1
 
 
+@pytest.mark.unit
+def test_layout_table_is_not_marked_as_table():
+    """셀 하나짜리 레이아웃 표는 청커가 평문으로 내므로 표로 세지 않는다(#394)."""
+    core = pytest.importorskip("docling_core.types.doc", exc_type=ImportError)
+    cell = core.TableCell(text="안내 산문", start_row_offset_idx=0, end_row_offset_idx=1,
+                          start_col_offset_idx=0, end_col_offset_idx=1)
+    table = core.TableItem(self_ref="#/tables/0", label="table",
+                           data=core.TableData(num_rows=1, num_cols=1, table_cells=[cell]))
+    builder = _Builder().set_table_info([table], {"#/tables/0": 3}, {})
+    assert (builder.has_table, builder.table_refs,
+            builder.table_split_index, builder.table_split_total) == (False, None, -1, -1)
+
+
 # ─── 설정 해석 ────────────────────────────────────────────────────────────────
 
-from genon.preprocessor.facade.common import config_parse as cp
+from genon.preprocessor.processing.common import config_parse as cp
 
 
 @pytest.mark.unit
@@ -122,7 +135,6 @@ import yaml
 from pathlib import Path
 
 _RESOURCE = Path(__file__).resolve().parents[2] / "resource"
-_RESOURCE_DEV = Path(__file__).resolve().parents[2] / "resource_dev"
 
 
 @pytest.mark.unit
@@ -138,16 +150,8 @@ def test_chunker_config_exposes_table_switches(name):
     output = yaml.safe_load((_RESOURCE / name).read_text(encoding="utf-8")).get("output")
     assert output is not None, f"{name} 에 output 블록이 없다"
     assert cp.resolve_table_format_setting(output) in {"html", "markdown", "auto"}
-    assert cp.resolve_table_row_serialization(output) is False  # 기본은 off
-
-
-@pytest.mark.unit
-def test_chunker_dev_config_matches_operational_keys():
-    ops = yaml.safe_load(
-        (_RESOURCE / "chunking_processor_config.yaml").read_text(encoding="utf-8"))["output"]
-    dev = yaml.safe_load(
-        (_RESOURCE_DEV / "chunking_processor_config.yaml").read_text(encoding="utf-8"))["output"]
-    assert set(ops) == set(dev)
+    # 켜고 끄는 값은 설정마다 다르다(표준 청커 설정은 on). 스위치가 노출됐는지만 본다.
+    assert "table_row_serialization" in output
 
 
 class _Processor:

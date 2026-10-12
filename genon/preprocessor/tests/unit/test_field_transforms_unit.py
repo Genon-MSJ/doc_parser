@@ -1,13 +1,14 @@
-"""facade/enrichment/field_transforms.py 에 대한 unit test.
+"""processing/enrichment/field_transforms.py 에 대한 unit test.
 
 순수 stdlib 모듈이라 docling/fastapi 없이 로컬에서도 실제 실행된다.
 """
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
 
-from facade.enrichment.field_transforms import (
+from processing.enrichment.field_transforms import (
     DEFAULT_METADATA_FIELD_TRANSFORMS,
     JSON_VALUE_SENTINEL,
     apply_field_transforms,
@@ -16,6 +17,8 @@ from facade.enrichment.field_transforms import (
     parse_created_date,
     serialize_metadata_value_for_output,
     store_metadata_in_document,
+    transform_regex_extract,
+    transform_to_int,
 )
 
 
@@ -50,6 +53,32 @@ def test_parse_created_date(text, expected):
     assert parse_created_date(text) == expected
 
 
+@pytest.mark.parametrize("value,expected", [
+    ("연 8.5%", None),            # monimo_cs_sss_chunksize_sample.json, 예전에는 85
+    ("만 0세 ~ 79세", None),       # monimo_product_ssf_sample.md, 예전에는 79
+    ("LIFE-CS-01", 1),            # monimo_cs_slf_sample.json faqId, 앞 글자에 붙은 - 는 부호가 아니다
+    ("-3", -3),
+    (15.0, 15),
+    (1.5, None),
+])
+def test_to_int_rejects_decimal_and_multiple_numbers(value, expected):
+    """소수·숫자 둘 이상을 이어 붙여 다른 정수를 만들지 않고 on_error 로 보낸다(#426).
+
+    문자열 행은 monimo 실물 샘플의 값이다. 음수와 float 입력은 실물에 사례가 없어 합성 입력을 쓴다.
+    """
+    assert transform_to_int(value) == expected
+
+
+def test_regex_extract_on_error_when_nothing_extracted():
+    """매칭이 없으면 on_error 다(#431).
+
+    패턴은 출고 custom_field_product_slf.yaml BIZ_ID, 값은 실물 샘플 파일명이다(8자리 일자가 없어 미매칭).
+    """
+    assert transform_regex_extract(
+        "monimo_product_slf_sample.md", pattern=r"^(.+?_\d{8})(?!\d)", on_error="없음"
+    ) == "없음"
+
+
 # ── apply_field_transforms ───────────────────────────────────────────────────
 
 @pytest.mark.unit
@@ -78,6 +107,17 @@ def test_apply_field_transforms_backward_compat_and_rename():
         {"doc_date": "2023.07.01", "department": "IT"}, document=None)
     assert typed == {"created_date": 20230701}
     assert "department" not in consumed  # 변환 비대상 필드는 passthrough 로 유지
+
+
+@pytest.mark.unit
+def test_default_created_date_reads_compact_forms():
+    """메타 기본 변환(created_date <- date_int)도 date_int_flex 와 같은 표기를 받는다(#425).
+
+    표기별 분기는 test_json_records_unit 의 date_int_flex 표가 같은 함수로 고정한다.
+    """
+    typed, _ = apply_field_transforms(
+        DEFAULT_METADATA_FIELD_TRANSFORMS, {"created_date": "20260713"}, document=None)
+    assert typed == {"created_date": 20260713}   # 예전에는 20260101
 
 
 @pytest.mark.unit
@@ -208,6 +248,23 @@ def test_store_metadata_types_only_typed_keys():
         "PRODUCT_ATTRS": {"a": 1},
         "issuer_name": "삼성카드",
     }
+
+
+@pytest.mark.unit
+def test_packed_json_string_survives_the_document_roundtrip():
+    """`pack` 산출(JSON 문자열)이 문서형 경로를 왕복해도 같은 문자열로 나간다.
+
+    문서형은 값을 문서 KeyValueItem 에 실어 chunk API 경계를 넘는데, 읽는 쪽이 `{`…`}` 를
+    dict 로 복원한다(`normalize_metadata_value`). 청크 출력 직전 다시 직렬화되므로 최종
+    property 는 같은 문자열이어야 한다 — 여기가 어긋나면 적재 값이 조용히 바뀐다.
+    """
+    packed = json.dumps({"A": '연 18,000원 "무이자"', "B": None, "C": 18000},
+                        ensure_ascii=False)
+    doc = _make_document(list(dict(_stored_pairs(
+        {"DETAIL_JSON": packed}, preserve_nulls=True)).items()))
+
+    restored = extract_metadata_from_document(doc)
+    assert serialize_metadata_value_for_output(restored["DETAIL_JSON"]) == packed
 
 
 @pytest.mark.unit

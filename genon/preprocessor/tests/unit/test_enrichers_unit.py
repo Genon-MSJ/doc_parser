@@ -23,8 +23,8 @@ import pytest
 
 pytest.importorskip("httpx")
 pytest.importorskip("docling_core")
-_me = pytest.importorskip("facade.enrichment.metadata_enricher")
-_cf = pytest.importorskip("facade.enrichment.custom_fields_enricher")
+_me = pytest.importorskip("processing.enrichment.metadata_enricher")
+_cf = pytest.importorskip("processing.enrichment.custom_fields_enricher")
 
 from docling_core.types.doc import (  # noqa: E402
     BoundingBox,
@@ -41,19 +41,21 @@ CustomFieldsEnricher = _cf.CustomFieldsEnricher
 
 # ── httpx.AsyncClient mock 헬퍼 ────────────────────────────────────────────────
 
-def _patch_async_client(module_path: str, captured: dict, content="{}"):
+def _patch_async_client(module_path: str, captured: dict, content="{}", body=None):
     """`<module>.httpx.AsyncClient` 를 async context manager mock 으로 패치한다.
 
     실제 전송 대신 post() 호출 인자를 captured 에 기록하고, LLM 응답 스키마를 흉내낸
-    가짜 response 를 돌려준다.
+    가짜 response 를 돌려준다. body 를 주면 그 JSON 을 그대로 돌려준다 — 게이트웨이가
+    HTTP 200 으로 다른 형식을 돌려주는 경우를 재현하는 용도다.
     """
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
     resp.json = MagicMock(
-        return_value={"choices": [{"message": {"content": content}}]}
+        return_value=body if body is not None
+        else {"choices": [{"message": {"content": content}}]}
     )
 
-    async def _post(url, json=None, headers=None):
+    async def _post(url, json=None, headers=None, **_kwargs):
         captured["url"] = url
         captured["json"] = json
         captured["headers"] = headers
@@ -100,8 +102,8 @@ def _make_custom_fields_enricher(**overrides):
 
 # 두 enricher 모두에서 동일하게 검증할 (생성자, 모듈경로) 쌍
 _ENRICHERS = [
-    pytest.param(_make_metadata_enricher, "facade.enrichment.metadata_enricher", id="metadata"),
-    pytest.param(_make_custom_fields_enricher, "facade.enrichment.custom_fields_enricher", id="custom_fields"),
+    pytest.param(_make_metadata_enricher, "processing.enrichment.metadata_enricher", id="metadata"),
+    pytest.param(_make_custom_fields_enricher, "processing.enrichment.custom_fields_enricher", id="custom_fields"),
 ]
 
 
@@ -110,44 +112,27 @@ _ENRICHERS = [
 @pytest.mark.unit
 @pytest.mark.parametrize("factory,_modpath", _ENRICHERS)
 class TestDefaultParse:
-    def test_direct_json_object(self, factory, _modpath):
-        enr = factory()
-        assert enr._default_parse('{"a": 1}') == {"a": 1}
+    @pytest.mark.parametrize("raw,expected", [
+        ('{"a": 1}', {"a": 1}),                                      # 본문이 그대로 JSON
+        ('[1, 2, 3]', {}),                                           # 배열은 dict 가 아니라 버린다
+        ('설명입니다.\n```json\n{"created_date": "2025-01-01"}\n```\n끝.',
+         {"created_date": "2025-01-01"}),                            # markdown 코드블록
+        ('결과는 다음과 같습니다 {"k": "v"} 이상입니다.', {"k": "v"}),    # 산문 사이 raw decode 스캔
+        (12345, {}),                                                 # 문자열도 dict 도 아님
+        ({"x": 1}, {"x": 1}),                                        # dict 는 그대로 통과
+        ('그냥 평범한 텍스트, JSON 없음', {}),
+    ], ids=["json-object", "json-array", "code-block", "amid-prose",
+            "non-string", "dict-passthrough", "garbage"])
+    def test_default_parse(self, factory, _modpath, raw, expected):
+        assert factory()._default_parse(raw) == expected
 
-    def test_json_array_is_not_dict_returns_empty(self, factory, _modpath):
-        enr = factory()
-        assert enr._default_parse('[1, 2, 3]') == {}
-
-    def test_markdown_code_block(self, factory, _modpath):
-        enr = factory()
-        out = "설명입니다.\n```json\n{\"created_date\": \"2025-01-01\"}\n```\n끝."
-        assert enr._default_parse(out) == {"created_date": "2025-01-01"}
-
-    def test_raw_decode_scan_amid_prose(self, factory, _modpath):
-        enr = factory()
-        out = "결과는 다음과 같습니다 {\"k\": \"v\"} 이상입니다."
-        assert enr._default_parse(out) == {"k": "v"}
-
-    def test_non_string_non_dict_returns_empty(self, factory, _modpath):
-        enr = factory()
-        assert enr._default_parse(12345) == {}
-
-    def test_dict_input_passthrough(self, factory, _modpath):
-        enr = factory()
-        assert enr._default_parse({"x": 1}) == {"x": 1}
-
-    def test_garbage_returns_empty(self, factory, _modpath):
-        enr = factory()
-        assert enr._default_parse("그냥 평범한 텍스트, JSON 없음") == {}
-
-    def test_extract_pattern_applied(self, factory, _modpath):
+    @pytest.mark.parametrize("raw,expected", [
+        ('blah <json>{"a": 2}</json> blah', {"a": 2}),
+        ('no markers here {"a": 2}', {}),    # 마커가 없으면 본문을 쓰지 않는다
+    ], ids=["match", "no-match"])
+    def test_extract_pattern(self, factory, _modpath, raw, expected):
         enr = factory(parser={"type": "json", "extract_pattern": r"<json>([\s\S]*?)</json>"})
-        out = "blah <json>{\"a\": 2}</json> blah"
-        assert enr._default_parse(out) == {"a": 2}
-
-    def test_extract_pattern_no_match_returns_empty(self, factory, _modpath):
-        enr = factory(parser={"type": "json", "extract_pattern": r"<json>([\s\S]*?)</json>"})
-        assert enr._default_parse("no markers here {\"a\": 2}") == {}
+        assert enr._default_parse(raw) == expected
 
 
 # ── _normalize_message_content ───────────────────────────────────────────────
@@ -155,22 +140,14 @@ class TestDefaultParse:
 @pytest.mark.unit
 @pytest.mark.parametrize("factory,_modpath", _ENRICHERS)
 class TestNormalizeMessageContent:
-    def test_plain_string(self, factory, _modpath):
-        enr = factory()
-        assert enr._normalize_message_content("hello") == "hello"
-
-    def test_list_of_text_dicts(self, factory, _modpath):
-        enr = factory()
-        content = [{"text": "a"}, {"text": "b"}]
-        assert enr._normalize_message_content(content) == "a\nb"
-
-    def test_list_of_strings(self, factory, _modpath):
-        enr = factory()
-        assert enr._normalize_message_content(["x", "y"]) == "x\ny"
-
-    def test_other_type_str_cast(self, factory, _modpath):
-        enr = factory()
-        assert enr._normalize_message_content(123) == "123"
+    @pytest.mark.parametrize("content,expected", [
+        ("hello", "hello"),
+        ([{"text": "a"}, {"text": "b"}], "a\nb"),   # text 키를 가진 dict 목록
+        (["x", "y"], "x\ny"),                       # 문자열 목록
+        (123, "123"),                                # 그 밖의 타입은 str 캐스트
+    ], ids=["plain-string", "text-dicts", "strings", "other-type"])
+    def test_normalize_message_content(self, factory, _modpath, content, expected):
+        assert factory()._normalize_message_content(content) == expected
 
 
 # ── _preprocess_text (MetadataEnricher 전용) ──────────────────────────────────
@@ -180,42 +157,44 @@ def test_metadata_preprocess_removes_image_tags():
     assert MetadataEnricher._preprocess_text("a <!-- image --> b <!--image--> c") == "a  b  c"
 
 
+def _last_user_message(factory, modpath, raw_text="DOC", document=None, **factory_kwargs):
+    """enricher 를 만들어 _call_llm 을 태우고 LLM payload 의 마지막 메시지를 돌려준다.
+
+    프롬프트 렌더 결과를 보는 테스트가 여럿이라 네 줄짜리 배관을 여기 한 벌만 둔다.
+    """
+    enr = factory(**factory_kwargs)
+    captured = {}
+    with _patch_async_client(modpath, captured):
+        if document is None:
+            asyncio.run(enr._call_llm(raw_text))
+        else:
+            asyncio.run(enr._call_llm(raw_text, document))
+    return captured["json"]["messages"][-1]
+
+
 # ── _call_llm 프롬프트 빌드 (httpx mock, 실제 전송 없음) ───────────────────────
 
 @pytest.mark.unit
 @pytest.mark.parametrize("factory,modpath", _ENRICHERS)
 class TestCallLlmPromptBuild:
-    def test_double_brace_placeholder_substituted(self, factory, modpath):
-        enr = factory(user_prompt="문서 내용: {{raw_text}}")
-        captured = {}
-        with _patch_async_client(modpath, captured):
-            asyncio.run(enr._call_llm("RAWDOC"))
-        messages = captured["json"]["messages"]
-        user_msg = messages[-1]
-        assert user_msg["role"] == "user"
-        assert user_msg["content"] == "문서 내용: RAWDOC"
-
-    def test_single_brace_placeholder_substituted(self, factory, modpath):
-        enr = factory(user_prompt="내용={raw_text}")
-        captured = {}
-        with _patch_async_client(modpath, captured):
-            asyncio.run(enr._call_llm("RAWDOC"))
-        assert captured["json"]["messages"][-1]["content"] == "내용=RAWDOC"
+    @pytest.mark.parametrize("user_prompt,raw_text,expected", [
+        ("문서 내용: {{raw_text}}", "RAWDOC", "문서 내용: RAWDOC"),   # 이중 중괄호
+        ("내용={raw_text}", "RAWDOC", "내용=RAWDOC"),                 # 단일 중괄호
+        ("", "RAWONLY", "RAWONLY"),                                   # 빈 프롬프트는 본문만
+    ], ids=["double-brace", "single-brace", "empty-falls-back-to-raw"])
+    def test_user_prompt_placeholder_substituted(
+        self, factory, modpath, user_prompt, raw_text, expected
+    ):
+        msg = _last_user_message(factory, modpath, raw_text, user_prompt=user_prompt)
+        assert msg["role"] == "user"
+        assert msg["content"] == expected
 
     def test_system_prompt_included_first(self, factory, modpath):
         enr = factory(system_prompt="SYSTEM")
         captured = {}
         with _patch_async_client(modpath, captured):
             asyncio.run(enr._call_llm("X"))
-        messages = captured["json"]["messages"]
-        assert messages[0] == {"role": "system", "content": "SYSTEM"}
-
-    def test_empty_user_prompt_falls_back_to_raw_text(self, factory, modpath):
-        enr = factory(user_prompt="")
-        captured = {}
-        with _patch_async_client(modpath, captured):
-            asyncio.run(enr._call_llm("RAWONLY"))
-        assert captured["json"]["messages"][-1]["content"] == "RAWONLY"
+        assert captured["json"]["messages"][0] == {"role": "system", "content": "SYSTEM"}
 
     def test_payload_carries_model_and_sampling(self, factory, modpath):
         enr = factory(model="my-model")
@@ -240,6 +219,92 @@ class TestCallLlmPromptBuild:
         with _patch_async_client(modpath, captured, content="MODEL_OUTPUT"):
             result = asyncio.run(enr._call_llm("X"))
         assert result == "MODEL_OUTPUT"
+
+
+# ── model_params 경유 생성 파라미터 · 헤더 (issue/372) ────────────────────────
+# top_p/seed/repetition_penalty 는 params 통로로만 지원한다(둘 다 생성자에 params: dict
+# 를 받는다). 미설정 시 payload 에 그 키가 없어야 기존 현장 payload 가 그대로 유지된다.
+
+@pytest.mark.unit
+@pytest.mark.parametrize("factory,modpath", _ENRICHERS)
+class TestGenerationParamsAndHeaders:
+    def test_params_dict_keys_land_in_payload(self, factory, modpath):
+        enr = factory(params={"top_p": 0.7, "seed": 42, "repetition_penalty": 1.1})
+        captured = {}
+        with _patch_async_client(modpath, captured):
+            asyncio.run(enr._call_llm("X"))
+        payload = captured["json"]
+        assert payload["top_p"] == 0.7
+        assert payload["seed"] == 42
+        assert payload["repetition_penalty"] == 1.1
+
+    def test_unset_params_keys_absent_from_payload(self, factory, modpath):
+        enr = factory()
+        captured = {}
+        with _patch_async_client(modpath, captured):
+            asyncio.run(enr._call_llm("X"))
+        payload = captured["json"]
+        assert "top_p" not in payload
+        assert "seed" not in payload
+        assert "repetition_penalty" not in payload
+
+    def test_params_dict_wins_over_named_value(self, factory, modpath):
+        enr = factory(temperature=0.2, params={"temperature": 0.9})
+        captured = {}
+        with _patch_async_client(modpath, captured):
+            asyncio.run(enr._call_llm("X"))
+        assert captured["json"]["temperature"] == 0.9
+
+    def test_headers_config_carried_and_authorization_not_overwritten(self, factory, modpath):
+        enr = factory(
+            api_key="ignored-key",
+            headers={"Authorization": "Bearer explicit", "X-Custom": "v"},
+        )
+        captured = {}
+        with _patch_async_client(modpath, captured):
+            asyncio.run(enr._call_llm("X"))
+        assert captured["headers"]["Authorization"] == "Bearer explicit"
+        assert captured["headers"]["X-Custom"] == "v"
+
+
+# ── chat completion 형식이 아닌 200 응답 ──────────────────────────────────────
+# 게이트웨이가 에러 봉투를 HTTP 200 으로 돌려주면 raise_for_status 를 통과한다. 그대로
+# 인덱싱하면 KeyError('choices') 만 남아 서버가 준 사유를 알 수 없으므로, 응답 본문을
+# 실은 오류로 바꾼다. 판정은 llm_response 한 벌이고 세 호출부가 그것을 거친다.
+
+@pytest.mark.unit
+@pytest.mark.parametrize("factory,modpath", _ENRICHERS)
+class TestNonChatCompletionResponse:
+    def test_error_envelope_raises_with_server_reason(self, factory, modpath):
+        enr = factory()
+        envelope = {
+            "object": "error",
+            "message": "maximum context length exceeded",
+            "code": 400,
+        }
+        captured = {}
+        with _patch_async_client(modpath, captured, body=envelope):
+            with pytest.raises(ValueError) as excinfo:
+                asyncio.run(enr._call_llm("X"))
+        # 서버가 준 사유가 메시지에 실려야 오류 로그만으로 원인을 되짚을 수 있다.
+        assert "maximum context length exceeded" in str(excinfo.value)
+
+    def test_oversized_body_is_truncated_in_message(self, factory, modpath):
+        enr = factory()
+        captured = {}
+        with _patch_async_client(modpath, captured, body={"detail": "가" * 5000}):
+            with pytest.raises(ValueError) as excinfo:
+                asyncio.run(enr._call_llm("X"))
+        message = str(excinfo.value)
+        assert "이하 생략" in message
+        assert len(message) < 700
+
+    def test_empty_choices_list_raises_instead_of_index_error(self, factory, modpath):
+        enr = factory()
+        captured = {}
+        with _patch_async_client(modpath, captured, body={"choices": []}):
+            with pytest.raises(ValueError):
+                asyncio.run(enr._call_llm("X"))
 
 
 # ── enrich() 비활성 no-op (url/model 미설정 → 네트워크 호출 없음) ──────────────
@@ -356,14 +421,21 @@ class TestCustomFieldsLoadConfig:
 
     def test_yaml_with_resource_path(self, tmp_path):
         cfg = tmp_path / "fields.yaml"
-        cfg.write_text("url: http://x\nmodel: m\n", encoding="utf-8")
+        cfg.write_text(
+            "schema: v2\nsource:\n  kind: document\n"
+            "llm:\n  - endpoint:\n      url: http://x\n      model: m\n",
+            encoding="utf-8",
+        )
         enr = object.__new__(CustomFieldsEnricher)
         loaded = enr._load_config("fields.yaml", str(tmp_path))
         assert loaded == {"url": "http://x", "model": "m"}
 
     def test_bare_name_with_resource_path(self, tmp_path):
         cfg = tmp_path / "authors.yaml"
-        cfg.write_text("output_fields: [authors]\n", encoding="utf-8")
+        cfg.write_text(
+            "schema: v2\nsource:\n  kind: document\nllm:\n  - out: [authors]\n",
+            encoding="utf-8",
+        )
         enr = object.__new__(CustomFieldsEnricher)
         loaded = enr._load_config("authors", str(tmp_path))
         assert loaded == {"output_fields": ["authors"]}
@@ -398,7 +470,7 @@ class TestCustomFieldsPromptFiles:
         assert enr._system_prompt == "FROM_FILE"
 
     def test_default_system_prompt_when_unset(self, tmp_path):
-        from facade.enrichment.custom_fields_enricher import _DEFAULT_CUSTOM_FIELDS_SYSTEM_PROMPT
+        from processing.enrichment.custom_fields_enricher import _DEFAULT_CUSTOM_FIELDS_SYSTEM_PROMPT
         enr = _make_custom_fields_enricher(
             system_prompt="", user_prompt="USER", resource_path=str(tmp_path),
         )
@@ -413,7 +485,9 @@ class TestCustomFieldsPromptFiles:
     def test_inline_yaml_prompt_loaded(self, tmp_path):
         """프롬프트를 config yaml 안에 직접 써도 파일과 동일하게 로드된다(자족 설정)."""
         (tmp_path / "cf.yaml").write_text(
-            'system_prompt: |\n  SYS_INLINE\nuser_prompt: |\n  USER_INLINE {{raw_text}}\n',
+            "schema: v2\nsource:\n  kind: document\nllm:\n  - prompt:\n"
+            "      system: |\n        SYS_INLINE\n"
+            "      user: |\n        USER_INLINE {{raw_text}}\n",
             encoding="utf-8",
         )
         enr = _make_custom_fields_enricher(
@@ -425,7 +499,7 @@ class TestCustomFieldsPromptFiles:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("resource_dir", ["resource", "resource_dev"])
+@pytest.mark.parametrize("resource_dir", ["resource"])
 class TestShippedCardConfigSelfContained:
     """출고 custom_field_card.yaml 이 외부 프롬프트 파일 없이 자족하는지 고정한다.
 
@@ -436,13 +510,17 @@ class TestShippedCardConfigSelfContained:
 
     def _enricher(self, resource_dir):
         from pathlib import Path
+        from shipped_config import sibling_presets
         base = Path(__file__).resolve().parents[2] / resource_dir
+        # 기동 경로와 같게 프리셋을 함께 넘긴다 — 카드 설정의 접속 정보는
+        # 프로세서 설정의 `model_presets.default` 에서 온다.
         return CustomFieldsEnricher(
-            config_file="custom_field_card.yaml", resource_path=str(base)
+            config_file="custom_field_card.yaml", resource_path=str(base),
+            model_presets=sibling_presets(base / "custom_field_card.yaml"),
         )
 
     def test_prompts_are_inline(self, resource_dir):
-        from facade.enrichment.custom_fields_enricher import (
+        from processing.enrichment.custom_fields_enricher import (
             _DEFAULT_CUSTOM_FIELDS_SYSTEM_PROMPT,
         )
         enr = self._enricher(resource_dir)
@@ -474,37 +552,27 @@ class TestTemplateVariablesAndMode:
         with pytest.raises(ValueError):
             factory(user_prompt="안녕 {{unknown_var}}")
 
-    def test_user_defined_variable_substituted(self, factory, modpath):
-        enr = factory(
-            user_prompt="회사={{company}} 문서={{raw_text}}",
-            variables={"company": "GenON"},
-        )
-        captured = {}
-        with _patch_async_client(modpath, captured):
-            asyncio.run(enr._call_llm("DOC"))
-        assert captured["json"]["messages"][-1]["content"] == "회사=GenON 문서=DOC"
-
-    def test_lenient_unknown_variable_renders_empty(self, factory, modpath):
-        enr = factory(user_prompt="[{{unknown_var}}] {{raw_text}}", template_mode="lenient")
-        captured = {}
-        with _patch_async_client(modpath, captured):
-            asyncio.run(enr._call_llm("DOC"))
-        assert captured["json"]["messages"][-1]["content"] == "[] DOC"
-
-    def test_json_braces_in_prompt_preserved(self, factory, modpath):
-        enr = factory(user_prompt='추출: {{raw_text}} 형식: {"date": "Y"}')
-        captured = {}
-        with _patch_async_client(modpath, captured):
-            asyncio.run(enr._call_llm("DOC"))
-        assert captured["json"]["messages"][-1]["content"] == '추출: DOC 형식: {"date": "Y"}'
+    @pytest.mark.parametrize("factory_kwargs,expected", [
+        # user-defined 변수는 variables 로 주입된다
+        ({"user_prompt": "회사={{company}} 문서={{raw_text}}",
+          "variables": {"company": "GenON"}}, "회사=GenON 문서=DOC"),
+        # lenient 모드에서 미지의 변수는 빈 문자열로 렌더된다
+        ({"user_prompt": "[{{unknown_var}}] {{raw_text}}",
+          "template_mode": "lenient"}, "[] DOC"),
+        # 단일 중괄호 JSON 은 토큰이 아니므로 그대로 보존된다
+        ({"user_prompt": '추출: {{raw_text}} 형식: {"date": "Y"}'},
+         '추출: DOC 형식: {"date": "Y"}'),
+    ], ids=["user-defined-variable", "lenient-unknown", "json-braces-preserved"])
+    def test_prompt_renders(self, factory, modpath, factory_kwargs, expected):
+        assert _last_user_message(factory, modpath, "DOC", **factory_kwargs)["content"] == expected
 
     def test_doc_context_fills_reserved(self, factory, modpath):
         """document 이 주어지면 filename/page_count 등 reserved 가 채워진다."""
-        enr = factory(user_prompt="{{filename}} p{{page_count}} {{raw_text}}")
         doc = MagicMock()
         doc.origin.filename = "a.pdf"
         doc.num_pages.return_value = 3
-        captured = {}
-        with _patch_async_client(modpath, captured):
-            asyncio.run(enr._call_llm("DOC", doc))
-        assert captured["json"]["messages"][-1]["content"] == "a.pdf p3 DOC"
+        msg = _last_user_message(
+            factory, modpath, "DOC", document=doc,
+            user_prompt="{{filename}} p{{page_count}} {{raw_text}}",
+        )
+        assert msg["content"] == "a.pdf p3 DOC"

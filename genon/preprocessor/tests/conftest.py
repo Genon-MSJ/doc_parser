@@ -4,6 +4,7 @@ pytest에서 자동 로드되는 공통 설정 파일.
 """
 
 import os
+import shutil
 import sys
 from pathlib import Path
 import pytest
@@ -11,13 +12,32 @@ import pytest
 # 이슈 #199 — pytest sys.path 보강.
 # pyproject.toml(rootdir=genon/preprocessor) 의 pythonpath 가 "src" 만이라
 # 로컬/일부 CI 환경에서 다음 두 가지 절대 import 가 깨질 수 있어 두 경로를 prepend:
-#   - `genon.preprocessor.converters.hwp_to_pdf.*` (신규 모듈, src/ 밖)  → repo root 필요
-#   - `facade.*`                                        (기존 facade 모듈) → genon/preprocessor 필요
+#   - `genon.preprocessor.processing.converters.hwp_to_pdf.*` (신규 모듈, src/ 밖)  → repo root 필요
+#   - `facade.*` / `processing.*`                        (파사드·처리 라이브러리) → genon/preprocessor 필요
 _PREPROC = Path(__file__).resolve().parents[1]   # genon/preprocessor
 _REPO_ROOT = Path(__file__).resolve().parents[3]  # repo root
 for _p in (_PREPROC, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _remove_sample_outputs():
+    """세션 동안 sample_files/ 최상위에 새로 생긴 산출물을 세션 종료 시 지운다(이슈 #460).
+
+    변환기는 운영 동작상 입력 파일 옆에 결과(PDF, 이미지 폴더)를 쓴다. 테스트가 sample_files 의
+    원본 경로를 그대로 넘기므로 작업 트리에 산출물이 남고, 다음 실행의 같은 stem 판정에 걸려
+    skip 수가 달라진다. 세션 시작 전부터 있던 항목은 지우지 않는다.
+    pytest-xdist(-n)로 실행하면 워커마다 세션 종료가 따로 일어나 다른 워커의 산출물을 지울 수 있다.
+    """
+    sample_dir = _PREPROC / "sample_files"
+    before = set(sample_dir.iterdir())
+    yield
+    for p in set(sample_dir.iterdir()) - before:
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
 
 
 # 프로젝트 루트 경로 반환
@@ -115,7 +135,7 @@ def _is_unit_test(request) -> bool:
 def _no_external_network_in_unit_tests(request):
     """unit 테스트는 외부 네트워크로 나가지 않는다.
 
-    출고 설정(`resource/`, `resource_dev/`)에는 실제 LLM 게이트웨이 URL 이 들어 있다.
+    출고·로컬 모델 설정(`resource/`, `genon/sites/dev/model_presets.yaml`)에는 실제 LLM 게이트웨이 URL 이 들어 있다.
     그 설정을 그대로 복사해 쓰는 테스트가 프로세서를 끝까지 돌리면 진짜 호출이 나간다.
     호출부마다 patch 로 막는 방식은 호출 경로가 하나 늘 때 조용히 새고, 실제로 샜다
     (convert_processor.__call__ 은 enrichment 계열 메서드를 5개 부르는데 테스트는 그중
@@ -172,16 +192,17 @@ def _stub_vlm_for_unit_tests(request, monkeypatch):
         return
 
     try:
-        # 이미지 설명 VLM 호출부는 enrichment.image_description 로 이동했다.
-        # facade 는 절대경로(genon.preprocessor.facade.*)로 이 모듈을 로드하므로
-        # 같은 모듈 객체를 얻으려면 동일 경로로 import 해야 한다(이중 import 방지).
-        import genon.preprocessor.facade.enrichment.image_description as image_desc_mod
+        # page/image/table description 세 곳의 VLM 호출은 모두 enrichment.image_request
+        # (공용 함수 request_image_description)를 지난다. facade 는 절대경로
+        # (genon.preprocessor.facade.*)로 이 모듈을 로드하므로 같은 모듈 객체를 얻으려면
+        # 동일 경로로 import 해야 한다(이중 import 방지, 이슈 #199).
+        import genon.preprocessor.processing.enrichment.image_request as image_request_mod
     except Exception:
-        # image_description 을 사용하지 않는 unit 테스트도 있으므로 조용히 패스
+        # image_request 를 사용하지 않는 unit 테스트도 있으므로 조용히 패스
         return
 
     monkeypatch.setattr(
-        image_desc_mod,
+        image_request_mod,
         "api_image_request",
         lambda *args, **kwargs: "",
         raising=False,

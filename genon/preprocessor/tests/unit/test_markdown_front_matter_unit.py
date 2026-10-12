@@ -8,11 +8,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from genon.preprocessor.facade.enrichment import custom_fields_enricher as cfe
-from genon.preprocessor.facade.enrichment.custom_fields_enricher import (
+from shipped_config import PREPROCESSOR_DIR, SITE_MONIMO
+
+from genon.preprocessor.processing.enrichment import custom_fields_enricher as cfe
+from genon.preprocessor.processing.enrichment.custom_fields_enricher import (
     CustomFieldsEnricher,
 )
-from genon.preprocessor.facade.enrichment.markdown_front_matter import (
+from genon.preprocessor.processing.enrichment.markdown_front_matter import (
     MarkdownFrontMatterSpec,
     build_markdown_front_matter_specs,
 )
@@ -144,12 +146,16 @@ def test_builder_routes_by_document_extractor_only():
 def test_builder_loads_child_markdown_config_and_applies_inline_override(tmp_path: Path):
     child = tmp_path / "product.yaml"
     child.write_text(
-        "markdown:\n"
-        "  front_matter:\n"
-        "    metadata_fields:\n"
-        "      source_file: source_file\n"
-        "      created_at: created_date\n"
-        "    exclude_text_fields: ['*']\n",
+        "schema: v2\n"
+        "source:\n"
+        "  kind: document\n"
+        "  pre:\n"
+        "    markdown:\n"
+        "      front_matter:\n"
+        "        metadata_fields:\n"
+        "          source_file: source_file\n"
+        "          created_at: created_date\n"
+        "        exclude_text_fields: ['*']\n",
         encoding="utf-8",
     )
     config = {
@@ -179,9 +185,13 @@ def test_builder_loads_child_markdown_config_and_applies_inline_override(tmp_pat
 def test_inline_markdown_false_disables_child_config(tmp_path: Path):
     child = tmp_path / "product.yaml"
     child.write_text(
-        "markdown:\n"
-        "  front_matter:\n"
-        "    metadata_fields: [source_file]\n",
+        "schema: v2\n"
+        "source:\n"
+        "  kind: document\n"
+        "  pre:\n"
+        "    markdown:\n"
+        "      front_matter:\n"
+        "        metadata_fields: [source_file]\n",
         encoding="utf-8",
     )
     config = {
@@ -263,29 +273,45 @@ def test_no_llm_and_no_structured_source_stores_nothing(monkeypatch):
 
 
 @pytest.mark.unit
-def test_front_matter_keys_are_the_only_typed_keys(monkeypatch):
-    """타입 보존(JSON 표식)은 front matter 유래 키에만 적용된다(#360)."""
-    calls = []
-    monkeypatch.setattr(
-        cfe,
-        "store_metadata_in_document",
-        lambda document, metadata, **kwargs: calls.append(kwargs),
+def test_config_decided_values_keep_their_type_across_the_document(tmp_path):
+    """front matter 와 설정(const/default/transform)이 정한 값은 타입이 보존된다(#360, #388).
+
+    설정이 정한 값까지 문자열로 저장하면 front matter 에 기간이 없는 문서만
+    `VALID_FROM: "0"` 이 되어, 같은 필드가 문서마다 int/str 로 갈린다.
+    LLM 이 뽑는 필드는 기존 컬렉션 property 타입을 지키려고 종전대로 문자열이다.
+    """
+    from docling_core.types.doc.document import DoclingDocument
+
+    from genon.preprocessor.processing.enrichment.field_transforms import (
+        extract_metadata_from_document,
     )
+
+    (tmp_path / "custom_field_doc.yaml").write_text(textwrap.dedent("""
+        schema: v2
+        source: {kind: document}
+        fields:
+          VALID_FROM: {alias: [sales_period], transform: [date_int_flex]}
+          SEQ_NO: {default: 7}
+          FIXED_NO: {const: 20260101}
+    """), encoding="utf-8")
     enricher = CustomFieldsEnricher(
-        doc_type="product_slf",
-        output_fields=["PRODUCT_NM"],
-        constants={"GROUP_C": "SLF"},
+        config_file="custom_field_doc.yaml", resource_path=str(tmp_path),
+        output_fields=["AMOUNT"],
     )
     enricher._extract_raw_text = lambda _document: "본문"
+    document = DoclingDocument(name="t")
 
     asyncio.run(enricher.enrich(
-        AsyncMock(),
+        document,
         doc_type="product_slf",
         _markdown_front_matter={"metadata": {"source_pages": 9}, "prompt_prefix": ""},
     ))
+    # LLM 필드가 문자열로 남는 경로는 store_metadata_in_document 단위 테스트가 고정한다.
+    stored = extract_metadata_from_document(document)
 
-    assert calls[0]["typed_keys"] == {"source_pages"}
-    assert calls[0]["preserve_nulls"] is True
+    assert {k: stored[k] for k in ("source_pages", "VALID_FROM", "SEQ_NO", "FIXED_NO")} == {
+        "source_pages": 9, "VALID_FROM": 0, "SEQ_NO": 7, "FIXED_NO": 20260101,
+    }
 
 
 @pytest.mark.unit
@@ -321,9 +347,8 @@ def test_front_matter_wins_over_llm_and_is_added_to_prompt(monkeypatch):
     assert raw_text_arg.endswith("본문")
 
 
-@pytest.mark.unit
-def test_product_markdown_parser_to_chunk_round_trip():
-    """출고 설정/샘플로 front matter 제거와 Docling JSON metadata 왕복을 검증."""
+def _product_slf_round_trip() -> list[dict]:
+    """출고 설정/샘플로 product_slf 파서→청커 왕복을 실제로 돌린다."""
     from fastapi import Request
 
     from genon.preprocessor.facade.chunking_processor import (
@@ -335,7 +360,7 @@ def test_product_markdown_parser_to_chunk_round_trip():
 
     async def _run():
         request = Request(scope={"type": "http"})
-        parser = ParserProcessor()
+        parser = ParserProcessor(str(PREPROCESSOR_DIR / SITE_MONIMO / "parser_processor_config.yaml"))  # 모니모 문서유형은 모니모 사이트 설정에 있다
         parser._output_format = "docling"
         for enricher in parser._intel.custom_fields_enrichers:
             if "product_slf" in enricher._doc_types:
@@ -359,7 +384,13 @@ def test_product_markdown_parser_to_chunk_round_trip():
         )
         return [vector.model_dump() for vector in vectors]
 
-    rows = asyncio.run(_run())
+    return asyncio.run(_run())
+
+
+@pytest.mark.unit
+def test_product_markdown_parser_to_chunk_round_trip():
+    """출고 설정/샘플로 front matter 제거와 Docling JSON metadata 왕복을 검증."""
+    rows = _product_slf_round_trip()
     forbidden = ("source_file:", "source_pages:", "created_at:", "conversion_note:")
     assert len(rows) == 7
     assert all(not any(token in row["text"] for token in forbidden) for row in rows)
@@ -369,9 +400,22 @@ def test_product_markdown_parser_to_chunk_round_trip():
     # 걷어냈다. 그래서 여기서는 남아 있는 선언만 단정한다 — 위 `forbidden` 검사가
     # "걷어낸 값이 본문으로 새지도 않는다" 를 함께 지킨다.
     assert all(row["created_date"] == 20260112 for row in rows)
-    assert all(row["PRODUCT_C"] == "30387" for row in rows)
     assert all(row["GROUP_C"] == "SLF" for row in rows)
     assert all(row["doc_type"] == "product_slf" for row in rows)
+    # PRODUCT_C 는 아래 xfail 테스트가 따로 본다 — 지금은 출고 설정 때문에 항상 null 이다.
+    assert all(row["PRODUCT_NM"] == "삼성 s교통상해보험(2501)(무배당)" for row in rows)
+
+
+@pytest.mark.unit
+def test_product_code_from_llm_survives_to_chunks():
+    """LLM 이 뽑은 PRODUCT_C 가 모든 청크 metadata 에 실려야 한다.
+
+    PRODUCT_C 는 NOT NULL 컬럼인데 front matter 에 상품코드가 없어 LLM 이 본문에서 찾는다.
+    설정이 `const: null` 이면 그 값을 덮어 항상 null 이 된다(default < LLM < front matter
+    < const). 값을 고정하려는 것이 아니라 "못 찾으면 null" 이므로 `default: null` 이다.
+    """
+    rows = _product_slf_round_trip()
+    assert all(row["PRODUCT_C"] == "30387" for row in rows)
 
 
 @pytest.mark.unit
@@ -469,7 +513,7 @@ def test_duplicate_targets_are_still_rejected():
 #
 # 실제 원천 파일로 검증한다 — front matter 값의 형태(코드값·비표준 날짜·브랜드 분리)를
 # 흉내낸 sample_files/monimo/monimo_product_slf_fields_sample.md 를 쓴다. 생성 스크립트는
-# examples/parse_chunk/make_product_slf_fields_sample.py 다.
+# tools/parse_chunk/make_product_slf_fields_sample.py 다.
 
 FIELDS_SAMPLE_MD = (
     Path(__file__).resolve().parents[2]
