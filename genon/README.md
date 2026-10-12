@@ -193,7 +193,7 @@ GenOS **코드서빙** 기능으로 띄우는 경로이며, 동작 방식이 전
 
 - 코드서빙 시스템이 이 **base 이미지**를 띄운 뒤, 런타임에 git 소스를 `/app/src/service` 로 clone 하고
   `main.py`(facade) 를 실행한다.
-- facade 의 무거운 deps 와 다운로드 아티팩트(모델/HWP SDK/rhwp/H2Orestart/폰트/NLTK/EasyOCR)는
+- facade 의 무거운 deps 와 다운로드 아티팩트(모델/HWP SDK/rhwp/H2Orestart/폰트/EasyOCR)는
   콜드스타트 단축 + 에어갭(오프라인) 동작을 위해 **base 이미지에 빌드 시점에 pre-bake** 한다
   (`Dockerfile.standard` 와 full parity).
 - 배포 후 게이트웨이로 호출하는 방법(`/health`·`/parser`·`/chunker` 등)은

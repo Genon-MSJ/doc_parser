@@ -41,7 +41,7 @@ PDF SDK의 사용 여부에 따라 `standard` 또는 `synap`로 분리됨.
 
 - docling: layout(`ds4sd--docling-layout-old`), tableformer, picture_classifier, easyocr(+ korean_g2)
 - unstructured hi_res 레이아웃 모델 yolox(`/models/unstructured/yolo_x_layout`). `UNSTRUCTURED_DEFAULT_MODEL_INITIALIZE_PARAMS_JSON_PATH` 가 같은 폴더의 `yolox_params.json` 을 가리킨다.
-- MiniLM 토크나이저 파일(`tokenizer_type: huggingface` 용, 가중치 제외)과 NLTK `punkt_tab`, `averaged_perceptron_tagger_eng`
+- MiniLM 토크나이저 파일(`tokenizer_type: huggingface` 용, 가중치 제외)
 
 ## HWP → PDF 변환 chain (런타임 동작)
 
