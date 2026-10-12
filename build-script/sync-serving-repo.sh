@@ -166,6 +166,7 @@ if tar_is_bsd; then
   # bsdtar(macOS 기본): 파이프를 쓰면 git archive 가 SIGPIPE(141)를 받고 pipefail 로 조용히 중단된다(#492).
   echo "[INFO] tar=bsdtar — export 를 임시 tar 파일 경유로 수행합니다."
   EXPORT_TAR="$(mktemp -t serving-export.XXXXXX)"
+  trap 'rm -f "${EXPORT_TAR}"' EXIT
   git -C "${ROOT_DIR}" archive --output="${EXPORT_TAR}" "${SOURCE_REF}" "${WHITELIST[@]}"
   tar -xf "${EXPORT_TAR}" -C "${DEST}"
   rm -f "${EXPORT_TAR}"
