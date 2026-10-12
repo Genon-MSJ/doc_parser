@@ -90,6 +90,33 @@ def test_layout_table_is_not_marked_as_table():
             builder.table_split_index, builder.table_split_total) == (False, None, -1, -1)
 
 
+@pytest.mark.unit
+def test_row_split_table_is_judged_once_per_document():
+    """행 단위로 나뉜 큰 표는 조각마다 다시 판정하지 않는다(#484).
+
+    `TableData.grid` 가 읽을 때마다 셀 전체를 새로 만들므로, 조각마다 판정하면 비용이
+    행 수의 제곱으로 늘어난다. 수정 전에는 이 크기에서 수 초가 걸렸다.
+    """
+    import time
+
+    core = pytest.importorskip("docling_core.types.doc", exc_type=ImportError)
+    rows, cols = 500, 10
+    cells = [core.TableCell(text=f"r{r}c{c}", start_row_offset_idx=r, end_row_offset_idx=r + 1,
+                            start_col_offset_idx=c, end_col_offset_idx=c + 1)
+             for r in range(rows) for c in range(cols)]
+    table = core.TableItem(self_ref="#/tables/0", label="table",
+                           data=core.TableData(num_rows=rows, num_cols=cols, table_cells=cells))
+    totals = {"#/tables/0": rows}
+    seen: dict = {}
+    kinds: dict = {}
+    started = time.perf_counter()
+    for _ in range(rows):
+        builder = _Builder().set_table_info([table], totals, seen, kinds)
+    elapsed = time.perf_counter() - started
+    assert (builder.has_table, builder.table_split_index) == (True, rows - 1)
+    assert elapsed < 1.0
+
+
 # ─── 설정 해석 ────────────────────────────────────────────────────────────────
 
 from genon.preprocessor.processing.common import config_parse as cp
