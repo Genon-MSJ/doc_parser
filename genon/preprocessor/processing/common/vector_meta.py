@@ -247,6 +247,8 @@ class VectorMetaBuilderBase:
                 and not degenerate_reason(item.data.grid, item.data.num_cols)]
         self.has_table = bool(refs)
         self.table_refs = json.dumps(refs) if refs else None
+        self.table_split_index = -1
+        self.table_split_total = -1
         if not refs or not split_totals or seen_counts is None:
             return self
         # 한 청크에 표가 여럿이면 조각 순서라는 개념이 성립하지 않으므로 비워 둔다.
