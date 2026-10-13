@@ -754,7 +754,8 @@ class ChunkerCore:
                 .set_media_files(chunk.source.meta.doc_items, include_tables=self.table_image_enabled)
                 .set_table_info(chunk.source.meta.doc_items,
                                 notes["table_split_totals"],
-                                notes["table_piece_seen"])
+                                notes["table_piece_seen"],
+                                notes["table_kinds"])
                 .set_guardrail_categories(
                     sorted(notes["chunk_cats"]) if notes["chunk_cats"] else None)
                 ).build(self.VECTOR_META)
@@ -798,6 +799,7 @@ class ChunkerCore:
             first_prefix_pending=False,
             appendix_list=[],
             table_piece_seen={},
+            table_kinds={},
             current_page=None,
             chunk_index_on_page=0,
             variant_values={},
@@ -914,6 +916,7 @@ class ChunkerCore:
             table_split_totals=split.table_split_totals,
             # 같은 표의 조각이 연속해서 나오는 순서가 곧 조각 번호다.
             table_piece_seen={},
+            table_kinds={},
             current_page=None,
             chunk_index_on_page=0,
             variant_values={},

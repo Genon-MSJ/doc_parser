@@ -48,11 +48,13 @@ fields:
   VALID_FROM:
     alias: [sales_period, version]
     transform:
+    - {name: regex_sub, pattern: '\s+', repl: ' '}   # 여러 줄 값을 한 줄로 편다. 줄바꿈이 남으면 아래 패턴이 매칭에 실패한다
     - {name: regex_extract, pattern: '^\s*([^~]*?)(?:\s*~\s*.*)?$'}
     - date_int
   VALID_TO:
     alias: [sales_period, version]
     transform:
+    - {name: regex_sub, pattern: '\s+', repl: ' '}
     - {name: regex_extract, pattern: '~\s*(.*?)\s*$'}
     - {name: regex_sub, pattern: '^\D+$', repl: '99991231'}
     - date_int
