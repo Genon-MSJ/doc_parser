@@ -119,6 +119,19 @@ def test_chunk_jobs_keep_their_own_split_info():
     assert page_counts(job_x, chunks_x) == solo_counts_x and solo_counts_x[0][1] > 1
 
 
+@pytest.mark.unit
+def test_chunk_page_counts_without_split_info():
+    """split 을 오버라이드해 notes["split"] 이 없는 경로(리뷰 지적)도 쪽별 청크 수를 넘어온 청크로 센다.
+    예전 폴백은 빈 카운터라 n_chunk_of_page 가 0 이었다."""
+    proc = chunker_facade.DocumentProcessor()
+    data = _doc("X", pages=1, per_page=12).export_to_dict()
+    job = jb.ChunkJob(request=None, file_path="", kind="docling", data=data, doc_type=None, params={"chunk_size": 300})
+    chunks = proc.split_document(job)
+    del job.notes["split"]                            # 오버라이드한 split_document 는 이 값을 남기지 않는다
+    metas = asyncio.run(proc.chunks_to_vector_metas(job, chunks))
+    assert {m.n_chunk_of_page for m in metas} == {len(chunks)} and len(chunks) > 1
+
+
 # ─── R3 로거: 요청이 프로세스 로깅을 끄지 않는다 ─────────────────────────────
 
 @pytest.mark.unit

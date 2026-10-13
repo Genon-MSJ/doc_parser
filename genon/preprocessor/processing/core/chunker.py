@@ -822,7 +822,16 @@ class ChunkerCore:
         _include_header: bool = _resolve_include_chunk_header(kwargs, self._include_chunk_header)
         # 표 표기형태별 변형 텍스트 기록부(청커가 남긴다). off 면 None 이라 필드가 아예 생기지 않는다.
         # split 을 오버라이드해 문서 청크를 직접 만든 파사드는 split_document 를 안 거쳐 notes["split"] 이 없다.
-        split = job.notes.get("split") or SplitInfo(page_chunk_counts=defaultdict(int), table_split_totals={})
+        # 그때 쪽별 청크 수는 넘어온 청크로 센다(_split_documents_ex 와 같은 규칙 — prov 없는 0쪽은 세지 않는다).
+        # 인스턴스 속성으로 되돌아가면 동시 요청에서 다른 문서 값이 섞인다. 표 조각 수는 청커 내부 기록이라
+        # 이 경로에서는 알 수 없어 비워 둔다.
+        split = job.notes.get("split")
+        if split is None:
+            fallback_counts: dict = defaultdict(int)
+            for c in chunks:
+                if c.kind != "marker" and c.page:
+                    fallback_counts[c.page] += 1
+            split = SplitInfo(page_chunk_counts=fallback_counts, table_split_totals={})
         _table_variants = split.table_variants
         if _table_variants is not None and not _table_variants.enabled():
             _table_variants = None
