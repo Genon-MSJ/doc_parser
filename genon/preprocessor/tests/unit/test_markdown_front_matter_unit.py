@@ -362,12 +362,6 @@ def _product_slf_round_trip() -> list[dict]:
         request = Request(scope={"type": "http"})
         parser = ParserProcessor(str(PREPROCESSOR_DIR / SITE_MONIMO / "parser_processor_config.yaml"))  # 모니모 문서유형은 모니모 사이트 설정에 있다
         parser._output_format = "docling"
-        for enricher in parser._intel.custom_fields_enrichers:
-            if "product_slf" in enricher._doc_types:
-                enricher._call_llm = AsyncMock(return_value=(
-                    '{"PRODUCT_C":"30387",'
-                    '"PRODUCT_NM":"삼성 s교통상해보험(2501)(무배당)"}'
-                ))
 
         source = (
             Path(__file__).resolve().parents[2]
@@ -402,20 +396,10 @@ def test_product_markdown_parser_to_chunk_round_trip():
     assert all(row["created_date"] == 20260112 for row in rows)
     assert all(row["GROUP_C"] == "SLF" for row in rows)
     assert all(row["doc_type"] == "product_slf" for row in rows)
-    # PRODUCT_C 는 아래 xfail 테스트가 따로 본다 — 지금은 출고 설정 때문에 항상 null 이다.
+    # 사이트 설정은 LLM 추출을 쓰지 않는다. PRODUCT_NM 은 front matter `title` 에서
+    # "상품요약서" 를 지운 값이고, 샘플에 상품코드가 없으므로 PRODUCT_C 는 `default: null` 이다.
     assert all(row["PRODUCT_NM"] == "삼성 s교통상해보험(2501)(무배당)" for row in rows)
-
-
-@pytest.mark.unit
-def test_product_code_from_llm_survives_to_chunks():
-    """LLM 이 뽑은 PRODUCT_C 가 모든 청크 metadata 에 실려야 한다.
-
-    PRODUCT_C 는 NOT NULL 컬럼인데 front matter 에 상품코드가 없어 LLM 이 본문에서 찾는다.
-    설정이 `const: null` 이면 그 값을 덮어 항상 null 이 된다(default < LLM < front matter
-    < const). 값을 고정하려는 것이 아니라 "못 찾으면 null" 이므로 `default: null` 이다.
-    """
-    rows = _product_slf_round_trip()
-    assert all(row["PRODUCT_C"] == "30387" for row in rows)
+    assert all(row["PRODUCT_C"] is None for row in rows)
 
 
 @pytest.mark.unit
