@@ -137,6 +137,25 @@ def _normalize_value(
     return str(value)
 
 
+def _flatten_scalar_list(value: Any) -> Any:
+    """목표 필드에 실을 front matter 값에서 스칼라 배열을 푼다.
+
+    `product_codes: ["LP123456"]` 처럼 값 하나를 배열로 적는 표기가 흔하다. 배열을 그대로
+    두면 출력에서 `'["LP123456"]'` JSON 문자열이 되어 정확 일치 필터에 걸리지 않는다.
+    빈 값을 뺀 원소가 하나면 그 원소를, 여럿이면 `", "` 로 이은 문자열을, 없으면 None 을
+    돌려준다(호출부는 이 경우를 원천키 누락으로 본다). 원소에 dict/list 가 섞인 구조
+    데이터와 스칼라는 그대로 둔다.
+    """
+    if not isinstance(value, list) or any(isinstance(item, (dict, list)) for item in value):
+        return value
+    items = [item for item in value if item not in (None, "")]
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(str(item) for item in items)
+
+
 def _policy(value: Any, name: str, default: str) -> str:
     policy = str(value or default).strip().lower()
     if policy not in _POLICIES:
@@ -378,14 +397,20 @@ class MarkdownFrontMatterSpec:
                 exc,
             )
         # 목표마다 **먼저 찾은** 원천키를 쓴다(다른 kind 의 alias 와 같은 규칙).
+        # 빈 배열은 값이 없는 것으로 보고 다음 원천키를 찾는다.
         selected: dict[str, Any] = {}
         missing_selected = []
         for target, sources in self.field_aliases.items():
-            found = next((s for s in sources if s in fields), None)
+            found = next(
+                (s for s in sources
+                 if s in fields and not (isinstance(fields[s], list)
+                                         and _flatten_scalar_list(fields[s]) is None)),
+                None,
+            )
             if found is None:
                 missing_selected.append(target)
                 continue
-            selected[target] = fields[found]
+            selected[target] = _flatten_scalar_list(fields[found])
         if missing_selected:
             _log.warning(
                 "Markdown front matter 별칭 원천키 누락(%s): %s",
