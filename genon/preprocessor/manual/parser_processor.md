@@ -1057,7 +1057,8 @@ markdown:
 - **본문에서 뺀 front matter 도 LLM 프롬프트에는 그대로 실립니다.** `PRODUCT_C` 처럼 근거가 front matter 에만 있는 추출 필드가 있기 때문입니다.
 - **front matter 값이 LLM 추출값보다 우선**합니다(구조화 원천이 추론값보다 신뢰도가 높음). 다만 config 의 `constants` 는 front matter 보다도 우선합니다.
 - `created_at → created_date` 매핑은 청커의 기본 metadata transform(`type: date_int`)을 타고 `20260112` 같은 정수 벡터 필드가 됩니다. **명시 매핑이 없으면 front matter 를 본문에서 뺀 순간 `created_date` 가 0 이 됩니다** — 기존에는 본문 스캔 fallback 이 front matter 의 날짜를 우연히 주워 왔기 때문입니다.
-- `source_pages: 9` 처럼 숫자/불리언/배열인 front matter 값은 **타입 그대로** 청크 property 가 됩니다. 이 타입 보존은 front matter 유래 키에만 적용되며, 다른 `custom_fields` 출력 필드는 종전 직렬화 규칙을 유지합니다(기존 컬렉션의 property 타입 호환).
+- `source_pages: 9` 처럼 숫자/불리언인 front matter 값은 **타입 그대로** 청크 property 가 됩니다. 이 타입 보존은 front matter 유래 키에만 적용되며, 다른 `custom_fields` 출력 필드는 종전 직렬화 규칙을 유지합니다(기존 컬렉션의 property 타입 호환).
+- 스칼라 배열인 front matter 값은 **평문으로 풀어서** 싣습니다. `["LP123456"]` 처럼 원소가 하나면 그 값, 여럿이면 `", "` 로 이은 문자열(`LP123456, LP999`)이 되고, 빈 배열 `[]` 은 값이 없는 것으로 보아 다음 원천키나 `default` 를 씁니다. 객체가 섞인 배열은 그대로 둡니다.
 - front matter 를 제외한 파생 md 는 **임시 파일로만** 존재하며 원본 파일명을 유지합니다(docling `origin.filename` 보존, 이미지 artifacts 경로도 원본 기준).
 
 > 이 처리는 **`/parse` → `/chunk` 워크플로 전용**입니다. `intelligent`(`/run`) · `convert` 는 `formats.md` 설정 자체가 없어 `.md` 를 docling 으로 파싱하지 않습니다(PDF 변환 경로).

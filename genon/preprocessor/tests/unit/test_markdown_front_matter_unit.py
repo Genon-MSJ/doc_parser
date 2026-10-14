@@ -55,7 +55,7 @@ def test_extract_selected_metadata_and_exclude_all_text(tmp_path: Path):
     assert result.metadata == {
         "source_pages": 9,
         "created_date": "2026-01-12",
-        "tags": ["보험", "교통"],
+        "tags": "보험, 교통",
     }
     assert result.filtered_text.startswith("# 실제 제목")
     assert "source_pages" not in result.filtered_text
@@ -665,3 +665,34 @@ def test_multiline_sales_period_is_parsed_without_backtracking(name):
     elapsed = time.perf_counter() - started
     assert (fields["VALID_FROM"], fields["VALID_TO"]) == (20251201, 20260315)
     assert elapsed < 0.5
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("line, expected", [
+    ('product_code: ["90001"]', "90001"),
+    ('product_code:\n  - "90001"', "90001"),
+    ('product_code: ["90001", "90002"]', "90001, 90002"),
+    ("product_code: []", None),
+])
+def test_front_matter_array_value_is_flattened(tmp_path: Path, line, expected):
+    """front matter 의 스칼라 배열이 transform 없이 PRODUCT_C 에 평문으로 실린다.
+
+    배열을 그대로 두면 출력이 `'["90001"]'` 이 되어 정확 일치 필터에 걸리지 않고, 빈 배열은
+    `default: null` 대신 `'[]'` 로 실렸다. 실물 샘플의 상품코드 줄만 바꿔 사이트 설정으로 확인한다.
+    """
+    base = PREPROCESSOR_DIR / SITE_MONIMO
+    name = "custom_field_product_slf.yaml"
+    source = FIELDS_SAMPLE_MD.read_text(encoding="utf-8")
+    assert 'product_code: "90001"' in source
+    sample = tmp_path / FIELDS_SAMPLE_MD.name
+    sample.write_text(source.replace('product_code: "90001"', line), encoding="utf-8")
+
+    enricher = CustomFieldsEnricher(config_file=name, resource_path=str(base),
+                                    model_presets=sibling_presets(base / name))
+    spec = build_markdown_front_matter_specs([{
+        "doc_type": "product_slf", "extractor": "llm",
+        "config_file": name, "resource_path": str(base),
+    }])[0]
+    fields = enricher._normalize_output_fields({}, spec.parse(sample).metadata)
+
+    assert fields["PRODUCT_C"] == expected
