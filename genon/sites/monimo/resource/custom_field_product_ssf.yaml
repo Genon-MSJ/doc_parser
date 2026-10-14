@@ -29,8 +29,6 @@ fields:
   PRODUCT_C:
     alias: [product_code, product_codes]
     default: null
-    transform:
-    - {name: regex_sub, pattern: '^\[[''"](.*?)[''"]\]$', repl: '\1'} 
   GROUP_C:
     const: SSF
   SALE_STATUS:
