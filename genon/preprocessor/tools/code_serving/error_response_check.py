@@ -32,6 +32,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[4]
 MONIMO = REPO_ROOT / "genon" / "preprocessor" / "sample_files" / "monimo"
 WORK = Path(tempfile.mkdtemp(prefix="error_response_check_"))
+MAX_CHARS = 1000
 
 
 def _resource_copy() -> Path:
@@ -47,6 +48,12 @@ def _resource_copy() -> Path:
     path = dst / "custom_field_term.yaml"
     cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
     cfg["source"]["sheets"] = ["공통_용어사전"]
+    path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    # 청크 글자 수 상한 보고(max_chars). 운영 값이 정해지지 않아 확인용 값을 넣는다.
+    path = dst / "chunking_processor_config.yaml"
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    cfg["chunking"]["validation"]["max_chars"] = MAX_CHARS
     path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
     path = dst / "parser_processor_config.yaml"
@@ -258,6 +265,18 @@ def main() -> int:
         failures += not ok
         print(f"[{'PASS' if ok else 'FAIL'}] {label}: missing_fields={missing} code={body.get('code')}")
         cases.append(label)
+
+    # 글자 수 상한 보고(max_length). 보고 건수가 실제로 상한을 넘은 출력 청크 수와 같아야 한다.
+    hpp = MONIMO / "monimo_product_hpp_rich_table_sample.json"
+    parsed_hpp = post("/parser", hpp, {"doc_type": "product_hpp"})["data"]
+    body = post("/chunker", "", {"doc_type": "product_hpp", "document": parsed_hpp})
+    report = (body.get("chunk_validation") or {}).get("max_length") or {}
+    over = sum(len(v.get("text") or "") > MAX_CHARS for v in body.get("data") or [])
+    ok = body.get("code") == 0 and over > 0 and report.get("count") == over
+    failures += not ok
+    print(f"[{'PASS' if ok else 'FAIL'}] 글자 수 상한 {MAX_CHARS} 초과 보고(product_hpp 표): "
+          f"보고={report.get('count')} 실제={over} 청크={len(body.get('data') or [])}")
+    cases.append("max_length")
 
     # 요청 형식 오류는 라우트 함수에 닿기 전에 FastAPI 가 거부한다.
     body = client.post("/parser", json={"params": {}}).json()

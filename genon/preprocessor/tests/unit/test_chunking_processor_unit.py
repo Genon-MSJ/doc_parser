@@ -1040,6 +1040,28 @@ async def test_overwritten_row_meta_is_reported():
 
 
 @pytest.mark.asyncio
+async def test_over_length_chunk_is_reported_not_dropped():
+    """max_chars 를 넘는 출력 청크는 drop 모드여도 버리지 않고 요약에 보고한다(#528).
+
+    본문은 실물 sample_files/monimo/monimo_faq_json_sample.json 첫 레코드의 질문이다.
+    """
+    tb = pytest.importorskip("processing.core.toolbox")
+    cf = pytest.importorskip("facade.chunking_processor")
+    question = "설정한 홈 화면을 변경하고 싶어요."
+    elements = [{"category": "tabular_row", "content": question, "page": 1, "id": 0,
+                 "metadata": {"QUESTION": question}}]
+    request = tb.mock_request()
+
+    vectors = await _validating(cf.DocumentProcessor(), max_chars=10)(
+        request, "", document={"elements": elements})
+
+    assert len(vectors) == 1
+    report = request.state.chunk_validation["max_length"]
+    assert (report["limit"], report["count"], report["items"][0]["n_char"]) == (
+        10, 1, len(vectors[0].text))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["drop", "report"])
 async def test_validation_judge_error(monkeypatch, action):
     """판정기가 실패하면 drop 은 문서를 실패 처리하고, report 는 기록만 하고 그대로 돌려준다.

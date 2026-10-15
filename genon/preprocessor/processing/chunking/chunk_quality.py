@@ -75,6 +75,7 @@ class Config:
     broken_max_share: float = 0.3
     broken_min_count: int = 3
     table_min_chars: bool = False   # 표가 든 청크에도 길이 하한을 적용할지
+    max_chars: int = 0              # 출력 청크 글자 수 상한(0 = 검사 안 함). 넘으면 보고만 한다(#528)
     by_doc_type: dict = field(default_factory=dict, compare=False, hash=False)
 
     @property
@@ -83,7 +84,7 @@ class Config:
 
 
 _BOOL_KEYS = ("fail_on_any", "table_min_chars")
-_COUNT_KEYS = ("min_chars", "row_min_chars", "repeat_min_count", "broken_min_count")
+_COUNT_KEYS = ("min_chars", "row_min_chars", "repeat_min_count", "broken_min_count", "max_chars")
 _SHARE_KEYS = ("repeat_max_share", "broken_max_share")
 _VALUE_KEYS = ("action",) + _BOOL_KEYS + _COUNT_KEYS + _SHARE_KEYS
 
@@ -512,6 +513,8 @@ class Session:
         self._pending_item: Optional[dict] = None
         # 청킹 중 빠지거나 다른 값으로 덮어써진 메타 필드(#528). 청크를 버리지 않는 보고 항목이다.
         self.missing_fields: Counter = Counter()
+        # 글자 수 상한(max_chars)을 넘은 출력 청크. 버리지 않는 보고 항목이다(#528).
+        self.over_length: list = []
 
     # --- 판정 1건 ---
     def _check(self, text, *, kind, code_like, prefix_len, stage, index, page,
@@ -635,6 +638,15 @@ class Session:
 
         if not kept and items:
             raise all_rejected_error(self)
+        if self.cfg.max_chars:
+            # 임베딩 모델이 받는 것은 접두를 포함한 출력 본문 전체이므로 그 길이로 잰다.
+            for position, item in enumerate(kept):
+                text = getattr(item, "text", None)
+                n_char = len(text) if isinstance(text, str) else 0
+                if n_char > self.cfg.max_chars:
+                    self.over_length.append({
+                        "index": getattr(item, "i_chunk_on_doc", position),
+                        "page": getattr(item, "i_page", None), "n_char": n_char})
         self.log_summary(kept)
         return kept
 
@@ -645,12 +657,15 @@ class Session:
 
     def summary(self) -> Optional[dict]:
         """성공 응답에 싣는 요약. 판정에 걸린 청크도 빠진 메타 필드도 없으면 None."""
-        if not self.records and not self.missing_fields:
+        if not self.records and not self.missing_fields and not self.over_length:
             return None
         out = {"action": self.cfg.action, "count": len(self.records),
                "reasons": self.reason_counts(), "items": list(self._items)}
         if self.missing_fields:
             out["missing_fields"] = dict(self.missing_fields)
+        if self.over_length:
+            out["max_length"] = {"limit": self.cfg.max_chars, "count": len(self.over_length),
+                                 "items": self.over_length[:SUMMARY_MAX_ITEMS]}
         return out
 
     def reason_counts(self) -> dict:
@@ -670,6 +685,10 @@ class Session:
         if self.missing_fields:
             _log.warning("[chunk_validation] file=%s 청킹 중 빠지거나 덮어써진 메타 필드=%s",
                          self.file_name, dict(self.missing_fields))
+        if self.over_length:
+            _log.warning("[chunk_validation] file=%s 글자 수 상한(%d) 초과 청크=%d건 최대=%d자",
+                         self.file_name, self.cfg.max_chars, len(self.over_length),
+                         max(item["n_char"] for item in self.over_length))
 
 
 def all_rejected_error(session: Session) -> ChunkValidationError:
