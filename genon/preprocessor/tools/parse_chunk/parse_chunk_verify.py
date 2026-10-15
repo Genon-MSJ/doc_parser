@@ -435,6 +435,12 @@ def check_cs_hpp_degenerate_table(chunks: list) -> list[str]:
         if "|" in line or "<table" in line or "<td" in line:
             problems.append(f"{field} 의 안내 배너가 표 표기를 달고 있습니다: {line[:60]!r}")
 
+    # 레이아웃 표는 표 설명 LLM 전송에서 빠지므로 배너 앞에 `[표 검색 설명]` 이 붙지 않는다(#530).
+    lines = (hit.get("text") or "").splitlines()
+    index = next(i for i, ln in enumerate(lines) if banner in ln)
+    if any("[표 검색 설명]" in ln for ln in lines[max(0, index - 3):index]):
+        problems.append("레이아웃 표(안내 배너)에 [표 검색 설명] 이 붙었습니다(LLM 전송 제외 누락)")
+
     # 대조군: 정형 표 2개는 표로 남는다(표기형태는 auto 가 정하므로 둘 다 허용).
     tables = [c.get("text") or "" for c in chunks if c.get("has_table")]
     kept = sum(
