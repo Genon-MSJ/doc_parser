@@ -8,6 +8,9 @@
 #   → `## 문서 개요`      (샘플에 따라 `## 목차` 로 오기도 한다)
 #   → `## 내용 색인`
 #   → `원문 전사` / `원문 N쪽 - {소제목}`
+#
+# 청크 본문에는 원문만 싣는다. `## 원문 전사` 가 있으면 그 앞(상품명 H1 제외)을 지우고,
+# 없어도 변환기가 붙인 안내 섹션과 원본 PDF 의 목차 페이지는 지운다(source.pre.markdown.sections).
 
 schema: v2
 source:
@@ -21,6 +24,9 @@ source:
         enable: true
         langs: ['', text]
         min_hangul_ratio: 0.3
+      sections:
+        after_heading: '## 원문 전사'
+        exclude: ['## 문서 개요', '## 핵심 키워드', '## 내용 색인', '## 원문*쪽-목차']
 fields:
   created_date:
     alias: [created_at]
