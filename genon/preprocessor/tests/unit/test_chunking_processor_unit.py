@@ -1018,6 +1018,28 @@ async def test_input_errors_are_permanent(kwargs, message, reason_code):
 
 
 @pytest.mark.asyncio
+async def test_overwritten_row_meta_is_reported():
+    """파서가 실어 보낸 행 메타가 청킹 중 예약 값으로 덮어써지면 검증 요약에 남는다(#528).
+
+    값은 실물 sample_files/monimo/monimo_faq_json_sample.json 의 첫 레코드다. i_page 는
+    외부 payload 가 예약 이름을 실어 온 경우를 흉내 낸 것이다. 문서는 실패하지 않는다.
+    """
+    tb = pytest.importorskip("processing.core.toolbox")
+    cf = pytest.importorskip("facade.chunking_processor")
+    elements = [{
+        "category": "tabular_row", "content": "설정한 홈 화면을 변경하고 싶어요.", "page": 1, "id": 0,
+        "metadata": {"BIZ_ID": "ca01_1", "QUESTION": "설정한 홈 화면을 변경하고 싶어요.", "i_page": 99},
+    }]
+    request = tb.mock_request()
+
+    vectors = await _validating(cf.DocumentProcessor(), action="report")(
+        request, "", document={"elements": elements})
+
+    assert [v.BIZ_ID for v in vectors] == ["ca01_1"]
+    assert request.state.chunk_validation["missing_fields"] == {"i_page": 1}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["drop", "report"])
 async def test_validation_judge_error(monkeypatch, action):
     """판정기가 실패하면 drop 은 문서를 실패 처리하고, report 는 기록만 하고 그대로 돌려준다.

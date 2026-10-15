@@ -510,6 +510,8 @@ class Session:
         self._default_kind = "docling"
         self._flagged_initial = False
         self._pending_item: Optional[dict] = None
+        # 청킹 중 빠지거나 다른 값으로 덮어써진 메타 필드(#528). 청크를 버리지 않는 보고 항목이다.
+        self.missing_fields: Counter = Counter()
 
     # --- 판정 1건 ---
     def _check(self, text, *, kind, code_like, prefix_len, stage, index, page,
@@ -637,12 +639,19 @@ class Session:
         return kept
 
     # --- 기록 ---
+    def note_missing_fields(self, fields) -> None:
+        """파서가 실어 보낸 메타 중 청크에 실리지 않은 필드를 센다. 행 청크는 청크마다, 문서 청크는 문서당 1회."""
+        self.missing_fields.update(fields)
+
     def summary(self) -> Optional[dict]:
-        """성공 응답에 싣는 요약. 판정에 걸린 청크가 없으면 None."""
-        if not self.records:
+        """성공 응답에 싣는 요약. 판정에 걸린 청크도 빠진 메타 필드도 없으면 None."""
+        if not self.records and not self.missing_fields:
             return None
-        return {"action": self.cfg.action, "count": len(self.records),
-                "reasons": self.reason_counts(), "items": list(self._items)}
+        out = {"action": self.cfg.action, "count": len(self.records),
+               "reasons": self.reason_counts(), "items": list(self._items)}
+        if self.missing_fields:
+            out["missing_fields"] = dict(self.missing_fields)
+        return out
 
     def reason_counts(self) -> dict:
         return dict(Counter(r["reason"] for r in self.records))
@@ -658,6 +667,9 @@ class Session:
             "판정률=%.1f%% 청크가_모두_걸린_페이지=%s",
             self.cfg.action, self.file_name, self.n_input, len(self.records), self.rejected,
             len(list(survivors)), self.reason_counts(), rate * 100, empty_pages or "-")
+        if self.missing_fields:
+            _log.warning("[chunk_validation] file=%s 청킹 중 빠지거나 덮어써진 메타 필드=%s",
+                         self.file_name, dict(self.missing_fields))
 
 
 def all_rejected_error(session: Session) -> ChunkValidationError:

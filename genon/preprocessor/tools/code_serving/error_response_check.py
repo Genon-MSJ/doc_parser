@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""루트 main.py 를 그대로 띄워 오류 응답의 사유 코드와 성격을 확인한다(#528).
+"""루트 main.py 를 그대로 띄워 오류 응답의 사유 코드·성격과 청크 검증 보고를 확인한다(#528).
 
 모니모 실물 샘플에서 오류 입력을 만들어 /parser·/chunker 에 넣고, 응답의 `reason_code`,
 `error_category`, `error_kind` 가 코드표(`manual/custom_fields_exceptions.md` 의 "사유 코드" 절)와 맞는지 단정한다.
@@ -234,6 +234,30 @@ def main() -> int:
     print(f"[{'PASS' if ok else 'FAIL'}] 시트 지정(용어사전+메뉴 통합 문서): elements={counts} "
           f"errMsg={str(mixed.get('errMsg'))[:80]}")
     cases.append("sheets")
+
+    # 청킹 중 빠진 메타 필드 보고(missing_fields). 문서는 실패하지 않는다.
+    # 실물 파서 산출에 외부 payload 처럼 예약 이름의 메타를 싣는다.
+    faq = post("/parser", MONIMO / "monimo_faq_json_sample.json", {"doc_type": "faq"})["data"]
+    for element in faq.get("elements") or []:
+        element.setdefault("metadata", {})["i_page"] = 99
+    slf = post("/parser", MONIMO / "monimo_product_slf_sample.md", {"doc_type": "product_slf"})["data"]
+    # 문서 메타는 docling 문서의 key_value_items 로 청커에 넘어간다. 실물 항목에 키·값 셀을 덧붙인다.
+    cells = slf["document"]["key_value_items"][0]["graph"]["cells"]
+    for label, text in (("key", "file_path"), ("value", "원본.pdf")):
+        cells.append({"label": label, "cell_id": len(cells), "text": text, "orig": text,
+                      "prov": None, "item_ref": None})
+    for label, doc_type, document, want in [
+        ("행 메타의 예약 키가 덮어써짐(faq)", "faq", faq, "i_page"),
+        ("문서 메타의 예약 키가 빠짐(product_slf)", "product_slf", slf, "file_path"),
+        ("정상 산출은 보고 없음(product_slf)", "product_slf",
+         post("/parser", MONIMO / "monimo_product_slf_sample.md", {"doc_type": "product_slf"})["data"], None),
+    ]:
+        body = post("/chunker", "", {"doc_type": doc_type, "document": document})
+        missing = (body.get("chunk_validation") or {}).get("missing_fields") or {}
+        ok = body.get("code") == 0 and (want in missing if want else not missing)
+        failures += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] {label}: missing_fields={missing} code={body.get('code')}")
+        cases.append(label)
 
     # 요청 형식 오류는 라우트 함수에 닿기 전에 FastAPI 가 거부한다.
     body = client.post("/parser", json={"params": {}}).json()

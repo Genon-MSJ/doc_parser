@@ -546,6 +546,7 @@ class ChunkerCore:
             self, job, notes["marker_vectors"],
             display=lambda text: self.clean_text(job, gr.apply_to_text(
                 text, notes["sensitive_infos"], notes["masking"])[0]))
+        self._note_missing_fields(job, notes.get("lost_doc_fields") or ())
         for chunk_idx, chunk in enumerate(chunks):
             if chunk.kind == "marker":
                 continue
@@ -668,6 +669,13 @@ class ChunkerCore:
                 vector_meta, chunk, notes.get("chunk_prefix", ""), notes["chunk_idx"])
         return vector_meta
 
+    @staticmethod
+    def _note_missing_fields(job, fields) -> None:
+        """청킹 중 빠진 메타 필드를 검증 요약에 남긴다. 검증이 꺼져 있으면 남기지 않는다."""
+        validation = job.notes.get("validation")
+        if fields and validation is not None:
+            validation.note_missing_fields(fields)
+
     def _record_vector_meta(self, job, chunk, text: str):
         """행·텍스트 청크 1건을 vector_meta 로 만든다.
 
@@ -687,26 +695,32 @@ class ChunkerCore:
         # meta: false 필드를 여기서 뺀다 — 값 조립은 이미 끝났고 남은 것은 적재뿐이다.
         record_meta = cp.strip_meta_excluded(record_meta)
         page = notes["chunk_page"]
+        merged = {
+            **record_meta,  # 목표 필드(question/answer_text/...) + doc_type. extra=allow 로 보존.
+            **notes["variant_values"],
+            'has_table': notes["has_table"],
+            'text': text,
+            'n_char': len(text),
+            'n_word': len(text.split()),
+            'n_line': len(text.splitlines()),
+            'i_page': page,
+            'e_page': page,
+            'i_chunk_on_page': notes["chunk_index_on_page"],
+            'n_chunk_of_page': notes["page_chunk_counts"][page],
+            'i_chunk_on_doc': notes["chunk_idx"],
+            **row_only,
+            'guardrail_categories': (
+                sorted(notes["chunk_cats"]) if notes["chunk_cats"] else None),
+            **notes["global_metadata"],
+            **notes["chunk_fields"],  # edit_chunk 가 info["fields"] 로 넘긴 청크별 값
+        }
+        # 뒤에 오는 예약 값이 파서가 실어 보낸 목표 필드를 덮어쓰면 보고한다(#528).
+        # edit_chunk 가 넘긴 값은 고객이 의도한 것이므로 세지 않는다.
+        self._note_missing_fields(job, [
+            key for key, value in record_meta.items()
+            if value is not None and merged[key] != value and key not in notes["chunk_fields"]])
         try:
-            return self.VECTOR_META.model_validate({
-                **record_meta,  # 목표 필드(question/answer_text/...) + doc_type. extra=allow 로 보존.
-                **notes["variant_values"],
-                'has_table': notes["has_table"],
-                'text': text,
-                'n_char': len(text),
-                'n_word': len(text.split()),
-                'n_line': len(text.splitlines()),
-                'i_page': page,
-                'e_page': page,
-                'i_chunk_on_page': notes["chunk_index_on_page"],
-                'n_chunk_of_page': notes["page_chunk_counts"][page],
-                'i_chunk_on_doc': notes["chunk_idx"],
-                **row_only,
-                'guardrail_categories': (
-                    sorted(notes["chunk_cats"]) if notes["chunk_cats"] else None),
-                **notes["global_metadata"],
-                **notes["chunk_fields"],  # edit_chunk 가 info["fields"] 로 넘긴 청크별 값
-            })
+            return self.VECTOR_META.model_validate(merged)
         except Exception as exc:
             # 목표필드명이 예약 필드(title/created_date/appendix)와 겹치면 타입 검증에 걸린다.
             # 그대로 두면 pydantic ValidationError 가 raw 로 올라가 stage 도 없고, ValueError
@@ -904,6 +918,14 @@ class ChunkerCore:
         )
         global_metadata.update(typed_values)  # 설정 기반 typed 필드 (created_date 등)
         global_metadata.update(passthrough_metadata)
+        # 문서 메타 중 예약 이름과 겹쳐 passthrough 에서 빠졌고 청크에 다른 값으로 실리는 필드(#528).
+        # 제어 키와 transform 이 소비한 키는 의도된 제거라 세지 않는다.
+        control_keys = {cp.BODY_FIELDS_KEY, cp.CHUNK_PREFIX_FIELDS_KEY, cp.FIRST_CHUNK_FIELDS_KEY,
+                        cp.FIELD_LABELS_KEY} | set(tv.field_names()) | consumed_keys
+        lost_doc_fields = sorted(
+            key for key, value in cp.strip_meta_excluded(merged_metadata).items()
+            if value is not None and key in reserved_keys and key not in control_keys
+            and global_metadata.get(key) != serialize_metadata_value_for_output(value))
         # 비-PDF 입력이 변환된 경우 vector 의 file_path 를 변환 PDF 경로로 set.
         if converted_pdf_path:
             global_metadata['file_path'] = converted_pdf_path
@@ -923,6 +945,7 @@ class ChunkerCore:
             first_prefix_pending=bool(_first_prefix_text),
             appendix_list=appendix_list,
             global_metadata=global_metadata,
+            lost_doc_fields=lost_doc_fields,
             # 문서형은 표 변형을 table_variants 기록부로 만든다. 반복문이 형식을 가리지 않게
             # 같은 키를 두되 이 경로에서는 쓰이지 않는다.
             variant_options={},
