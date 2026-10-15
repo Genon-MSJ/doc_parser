@@ -105,6 +105,16 @@ def test_context_tokens_old_and_new_names_override_each_other(common_key, local_
 
 
 @pytest.mark.unit
+def test_skip_block_merges_per_key():
+    """문서유형이 skip 의 한 키만 바꿔도 공통 설정의 다른 키가 살아 있다."""
+    merged = merge_table_text_description(
+        {"skip": {"layout": False}}, {"skip": {"self_describing": True}}
+    )
+    options = TableTextDescriptionOptions.from_config(merged)
+    assert (options.skip_layout, options.skip_self_describing) == (False, True)
+
+
+@pytest.mark.unit
 def test_doc_type_yaml_switches_the_standalone_runner(configured):
     assert configured.wants(doc_type="prod") is False      # llm 문서유형이 껐다
     assert configured.wants(doc_type="cs_ssf") is False    # 레코드 문서유형이 껐다

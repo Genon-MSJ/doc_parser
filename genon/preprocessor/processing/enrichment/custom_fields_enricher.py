@@ -997,7 +997,8 @@ class CustomFieldsEnricher(BaseEnricher):
 
     @staticmethod
     def _clean_string_list(value: Any, limit: int, max_chars: int | None = None) -> list[str]:
-        if not isinstance(value, list):
+        # 상한 0 은 "만들지 않음"이다. 검사를 append 뒤에만 두면 0 이어도 1개가 남는다.
+        if not isinstance(value, list) or limit <= 0:
             return []
         result: list[str] = []
         for item in value:
@@ -1232,6 +1233,7 @@ class CustomFieldsEnricher(BaseEnricher):
             fitted, fits = targets, False
 
         if fits:
+            _log.info(f"[table_text_description] 표 {len(fitted)}개를 custom_fields 호출 1회에 함께 설명합니다.")
             parsed = await self._describe_call(raw_text, document, fitted, **kwargs)
             try:
                 self._attach_table_descriptions(parsed, fitted)
@@ -1252,6 +1254,7 @@ class CustomFieldsEnricher(BaseEnricher):
         # batch 정책: custom fields는 한 번만 호출하고 표는 들어가는 만큼 묶어 추가 호출한다.
         try:
             batches = self._plan_batches(document, fitted)
+            _log.info(f"[table_text_description] 표 {len(fitted)}개를 {len(batches)}개 배치로 호출합니다.")
             done, failure = await self._call_table_batches(document, batches, **kwargs)
             for table_batch, table_parsed in done:
                 self._attach_table_descriptions(table_parsed, table_batch)
@@ -1282,6 +1285,7 @@ class CustomFieldsEnricher(BaseEnricher):
         if not targets:
             return results
         batches = self._plan_batches(document, targets)
+        _log.info(f"[table_text_description] 표 {len(targets)}개를 {len(batches)}개 배치로 호출합니다.")
         done, failure = await self._call_table_batches(document, batches, **kwargs)
         for batch, parsed in done:
             values = parsed.get("_table_descriptions")
@@ -1312,6 +1316,7 @@ class CustomFieldsEnricher(BaseEnricher):
             return
         fitted, fits = self._fit_targets("", document, targets)
         if fits:
+            _log.info(f"[table_text_description] 표 {len(fitted)}개를 1회 호출로 설명합니다.")
             parsed = await self._describe_call("", document, fitted, **kwargs)
             self._attach_table_descriptions(parsed, fitted)
             return
