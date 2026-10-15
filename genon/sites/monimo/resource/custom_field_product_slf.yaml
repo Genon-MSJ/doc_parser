@@ -52,7 +52,8 @@ fields:
     transform:
     - {name: regex_sub, pattern: '\s*상품요약서$', repl: ''} 
   PRODUCT_ATTRS:
-    alias: [created_at]
+    # alias: [created_at]
+    alias: [sales_period, version]
     transform:
     - {name: regex_sub, pattern: '\s+', repl: ' '}   # 여러 줄 값을 한 줄로 편다. 줄바꿈이 남으면 아래 패턴이 매칭에 실패한다
     - {name: regex_extract, pattern: '^\s*([^~]*?)(?:\s*~\s*.*)?$'}
