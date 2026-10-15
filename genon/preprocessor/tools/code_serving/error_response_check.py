@@ -8,6 +8,11 @@ local_main_test.py 와 같이 FastAPI TestClient 로 앱을 직접 호출하므�
 설정은 모니모 완성본의 임시 사본을 쓴다. front matter 오류는 현장 설정(on_invalid 기본
 ignore)에서 나지 않으므로 사본의 product_slf 에만 `on_invalid: error` 를 켠다.
 
+LLM 오류는 실패를 응답까지 올리는 docling 목차 enrichment(`toc=1`)로 확인한다. custom_fields LLM
+추출·문서 요약·표 설명은 strict 여도 경고 후 진행하므로 쓰지 않는다. 텍스트 LLM 프리셋(default)은
+정해진 상태로 응답하는 로컬 모의 서버로 돌린다. 목차 경로는 긴 문서를 나눠 부르므로 사전 길이
+검사(PARSE_P001)는 여기서 재현하지 않고 단위 테스트가 확인한다.
+
     genon/preprocessor/.venv/bin/python genon/preprocessor/tools/code_serving/error_response_check.py
 """
 
@@ -18,6 +23,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import yaml
@@ -35,9 +42,48 @@ def _resource_copy() -> Path:
     cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
     cfg["source"]["pre"]["markdown"]["front_matter"]["on_invalid"] = "error"
     path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    path = dst / "parser_processor_config.yaml"
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for item in cfg["enrichment"]:
+        if "toc" in item:
+            # 켜 두되 요청마다 toc 로 끈다(post 의 기본값 toc=0).
+            item["toc"]["enable"] = True
+    path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return dst
 
 
+# 모의 LLM 서버. _LLM_MODE 값으로 응답을 고른다: 상태 번호 또는 "close"(연결 끊기).
+_LLM_MODE = {"value": 503}
+
+
+class _MockLLM(BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        mode = _LLM_MODE["value"]
+        if mode == "close":
+            self.close_connection = True
+            self.connection.close()
+            return
+        status, body = mode, b'{"error": "mock"}'
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", "0")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+_SERVER = ThreadingHTTPServer(("127.0.0.1", 0), _MockLLM)
+threading.Thread(target=_SERVER.serve_forever, daemon=True).start()
+_PRESETS = WORK / "model_presets.local.yaml"
+_PRESETS.write_text(yaml.safe_dump({"model_presets": {"default": {
+    "url": f"http://127.0.0.1:{_SERVER.server_port}/v1/chat/completions", "api_key": "", "model": "mock"}}}),
+    encoding="utf-8")
+os.environ["GENOS_MODEL_PRESETS_FILE"] = str(_PRESETS)
 os.environ["GENOS_RESOURCE_DIR"] = str(_resource_copy())
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import local_main_test  # noqa: E402,F401  더미 env 와 sys.path 설정을 재사용한다
@@ -96,6 +142,8 @@ def main() -> int:
     src = _derived_inputs()
 
     def post(route: str, file_path, params: dict) -> dict:
+        if route == "/parser":
+            params = {"toc": 0, **params}
         return client.post(route, json={"file_path": str(file_path), "params": params}).json()
 
     parsed = post("/parser", MONIMO / "monimo_product_ssf_sample.md", {"doc_type": "product_ssf"})
@@ -141,6 +189,24 @@ def main() -> int:
         print(f"[{'PASS' if ok else 'FAIL'}] {label}: reason_code={got[0]} "
               f"error_category={body.get('error_category')} error_kind={got[1]}"
               + ("" if ok else f"  기대={want_code}/{want_kind}  errMsg={str(body.get('errMsg'))[:120]}"))
+
+    small = MONIMO / "monimo_product_ssf_sample.md"
+    llm_cases = [
+        (503, small, "product_ssf", "PARSE_S101", "transient"),
+        (429, small, "product_ssf", "PARSE_S101", "transient"),
+        ("close", small, "product_ssf", "PARSE_S101", "transient"),
+        (401, small, "product_ssf", "PARSE_S001", "permanent"),
+    ]
+    for mode, path, doc_type, want_code, want_kind in llm_cases:
+        _LLM_MODE["value"] = mode
+        body = post("/parser", path, {"doc_type": doc_type, "toc": 1})
+        got = (body.get("reason_code"), body.get("error_kind"))
+        ok = got == (want_code, want_kind) and body.get("stage") == "enrichment"
+        failures += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] 목차 LLM {mode}({path.name}): reason_code={got[0]} error_kind={got[1]} "
+              f"stage={body.get('stage')}"
+              + ("" if ok else f"  기대={want_code}/{want_kind}  errMsg={str(body.get('errMsg'))[:120]}"))
+    cases += llm_cases
 
     # 요청 형식 오류는 라우트 함수에 닿기 전에 FastAPI 가 거부한다.
     body = client.post("/parser", json={"params": {}}).json()

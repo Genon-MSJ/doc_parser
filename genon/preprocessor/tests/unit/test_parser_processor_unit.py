@@ -446,6 +446,9 @@ def test_enrichment_provider_error_is_rethrown_as_genos_exception(intel):
             intel.enrichment(dummy_doc)
 
     assert exc_info.value.error_msg == raw_error
+    # 원인 예외 없이 상태 400 이면 docling 의 길이 사전 검사다(#528).
+    assert (exc_info.value.stage, exc_info.value.error_type, exc_info.value.reason_code) == (
+        "enrichment", "permanent", "PARSE_P001")
 
 
 # ─── _normalize_output_format / _normalize_table_format ─────────────────────

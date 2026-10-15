@@ -175,8 +175,8 @@ def _llm_reason(exc: Exception, error_type: str):
         return "PARSE_S101"
     if isinstance(getattr(exc, "status_code", None), int):
         return "PARSE_S001"       # 4xx: 인증·권한·요청 거부
-    if "LLMResponseError" in type(exc).__name__:
-        return "PARSE_S201"       # 응답 형식 이상
+    if any("LLMResponseError" in type(e).__name__ for e in (exc, exc.__cause__)):
+        return "PARSE_S201"       # 응답 형식 이상(송신기가 LLMApiError 로 포장한 경우 포함)
     return None                   # 진입점이 미분류 코드를 싣는다
 
 
@@ -322,7 +322,13 @@ class IntelligentDocumentProcessor(DoclingRuntimeBase):
             return document
         except LLMApiError as e:
             # Preserve provider error payload as-is for load status error message.
-            raise GenosServiceException("1", e.raw_error_message) from e
+            # 길이 사전 검사는 호출 전에 docling 이 상태 400 으로 직접 던지므로 원인 예외가 없다(#528).
+            error_type = _classify_error(e)
+            precheck = e.status_code == 400 and e.__cause__ is None
+            raise GenosServiceException(
+                "1", e.raw_error_message, stage="enrichment", error_type=error_type,
+                reason_code="PARSE_P001" if precheck else _llm_reason(e, error_type),
+            ) from e
 
 
 # ============================================================
