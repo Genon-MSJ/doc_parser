@@ -105,8 +105,9 @@ async def test_broken_json_without_hook_still_fails(tmp_path: Path):
     """훅이 손대지 않으면 종전대로 입력 오류다(하위호환)."""
     src = tmp_path / "a.json"
     src.write_text("{not json", encoding="utf-8")
-    with pytest.raises(core_parser.GenosServiceException):
+    with pytest.raises(core_parser.GenosServiceException) as exc:
         await _bare(parser_facade.DocumentProcessor)._load_json_payload(str(src), "any")
+    assert exc.value.error_type == "permanent"    # 재시도해도 같은 원천 오류다(#528)
 
 
 @pytest.mark.asyncio

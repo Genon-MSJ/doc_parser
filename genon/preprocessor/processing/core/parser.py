@@ -167,12 +167,12 @@ def _write_derived(work_dir: str, src_path: str, ext: str, text: str) -> str:
 
 def _config_error(message: str) -> "GenosServiceException":
     """기동 시 설정 오류용 예외 팩토리. 공용 모듈이 이 facade 의 예외 클래스를 쓰게 하는 통로다."""
-    return GenosServiceException("1", message, stage="custom_fields")
+    return GenosServiceException("1", message, stage="custom_fields", error_type="permanent")
 
 
 def _routing_error(message: str) -> "GenosServiceException":
     """요청 처리 중 doc_type 매칭 오류. 기동 시 설정 오류가 아니므로 stage 를 붙이지 않는다."""
-    return GenosServiceException("1", message)
+    return GenosServiceException("1", message, error_type="permanent")
 
 
 def _guard(label: str, fn, *args, **kwargs):
@@ -398,6 +398,7 @@ class GenericDocumentLoader:
                 f"이 형식은 unstructured 패키지가 있어야 처리됩니다({exc}). "
                 f"표준 포맷으로 변환해 올리거나 파서 설정의 formats.extension_aliases 로 "
                 f"처리할 포맷을 지정하세요: {os.path.basename(file_path)}",
+                error_type="permanent",
             ) from exc
         ext = os.path.splitext(file_path)[-1].lower()
         if ext in ['.jpg', '.jpeg', '.png']:
@@ -839,6 +840,7 @@ class ParserCore:
                             f"있지 않아 '{os.path.basename(file_path)}' 처리에 실패했습니다. "
                             f"PDF 로 변환한 파일을 입력하거나, 변환기를 포함해 전처리기 이미지를 다시 "
                             f"빌드하세요 (genon/README.md 참고).",
+                            error_type="permanent",
                         ) from sdk_err
                     raise sdk_err
             raise
@@ -906,7 +908,7 @@ class ParserCore:
                 parsed = fm_spec.parse(file_path)
             except ValueError as exc:
                 raise GenosServiceException(
-                    "1", str(exc), stage="custom_fields"
+                    "1", str(exc), stage="custom_fields", error_type="permanent"
                 ) from exc
             if parsed.found:
                 context = {
@@ -930,7 +932,8 @@ class ParserCore:
                 selected, removed = sections_spec.apply(source)
             except ValueError as exc:
                 raise GenosServiceException(
-                    "1", f"{exc} ({Path(file_path).name})", stage="custom_fields"
+                    "1", f"{exc} ({Path(file_path).name})", stage="custom_fields",
+                    error_type="permanent",
                 ) from exc
             if removed:
                 _log.info(
@@ -1095,7 +1098,8 @@ class ParserCore:
                 ".json", {**kwargs, "doc_type": doc_type}, text)
             if not changed:
                 raise GenosServiceException(
-                    "1", f"JSON 파일을 읽을 수 없습니다: {os.path.basename(file_path)} ({exc})"
+                    "1", f"JSON 파일을 읽을 수 없습니다: {os.path.basename(file_path)} ({exc})",
+                    error_type="permanent",
                 ) from exc
             return payload
         payload, _ = await self._hook_edit_input(
@@ -1123,7 +1127,8 @@ class ParserCore:
                 )
             except (ValueError, FileNotFoundError, TypeError) as exc:
                 raise GenosServiceException(
-                    "1", f"llm_fields 설정 오류({spec.label}): {exc}", stage="custom_fields"
+                    "1", f"llm_fields 설정 오류({spec.label}): {exc}", stage="custom_fields",
+                    error_type="permanent",
                 ) from exc
             self._llm_field_enrichers[spec] = enricher
         return enricher
@@ -1252,7 +1257,8 @@ class ParserCore:
         if not records and os.path.getsize(file_path) > 0:
             raise GenosServiceException(
                 "1", f"구분자 {spec.separator!r} 로 나뉜 레코드가 없습니다: "
-                f"{os.path.basename(file_path)}. doc_type({doc_type}) 이 이 원천에 맞는지 확인하세요."
+                f"{os.path.basename(file_path)}. doc_type({doc_type}) 이 이 원천에 맞는지 확인하세요.",
+                error_type="permanent",
             )
         return records
 
@@ -1282,7 +1288,8 @@ class ParserCore:
                     **file_kwargs,
                 )
             except ValueError as exc:
-                raise GenosServiceException("1", str(exc), stage="custom_fields") from exc
+                raise GenosServiceException(
+                    "1", str(exc), stage="custom_fields", error_type="permanent") from exc
 
             fields_list = await self._apply_llm_fields(mapper, fields_list)
             _log.info(
@@ -1323,7 +1330,8 @@ class ParserCore:
                     compact_tables=bool(getattr(self, "_compact_tables", True)),
                 )
             except (FileNotFoundError, TypeError, ValueError) as exc:
-                raise GenosServiceException("1", str(exc), stage="custom_fields") from exc
+                raise GenosServiceException(
+                    "1", str(exc), stage="custom_fields", error_type="permanent") from exc
             claimed_pages.update(claimed_row_pages(fields_list))
             fields_list = await self._apply_llm_fields(mapper, fields_list)
             _log.info(f"[parser] tabular_mapping 행 {len(fields_list)}건 → element")
@@ -1362,7 +1370,8 @@ class ParserCore:
         try:
             merged_html = json_payload_to_html(payload, spec, stem)
         except ValueError as exc:
-            raise GenosServiceException("1", str(exc), stage="custom_fields") from exc
+            raise GenosServiceException(
+                "1", str(exc), stage="custom_fields", error_type="permanent") from exc
 
         html_path = os.path.join(work_dir, f"{stem}.html")
         with open(html_path, "w", encoding="utf-8") as fp:
@@ -2056,7 +2065,8 @@ class ParserCore:
             if bad_reason:
                 _log.warning(f"[parser] 비정상 파일 감지({bad_reason}) — 처리 중단: {file_path}")
                 raise GenosServiceException(
-                    "1", f"{bad_reason} 입니다. 정상 문서로 다시 업로드하세요: {os.path.basename(file_path)}"
+                    "1", f"{bad_reason} 입니다. 정상 문서로 다시 업로드하세요: {os.path.basename(file_path)}",
+                    error_type="permanent",
                 )
 
             if ext != raw_ext:

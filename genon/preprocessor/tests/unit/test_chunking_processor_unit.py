@@ -997,6 +997,26 @@ async def test_validation_fails_document(values, code):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs,message", [
+    ({}, "입력이 필요합니다"),
+    ({"document": {"foo": 1}}, "인식할 수 없습니다"),
+    ({"document": {"schema_name": "DoclingDocument", "texts": "broken"}}, "복원 실패"),
+])
+async def test_input_errors_are_permanent(kwargs, message):
+    """청커 입력 오류는 다시 시도해도 같으므로 error_kind 가 permanent 로 실린다(#528).
+
+    실물 파서 산출로 만든 같은 입력은 tools/code_serving 경로로 확인했다. 여기서는 해당
+    분기만 타면 되므로 최소 입력을 쓴다.
+    """
+    cf = pytest.importorskip("facade.chunking_processor")
+
+    with pytest.raises(cf.GenosServiceException, match=message) as exc:
+        await cf.DocumentProcessor()(None, "", **kwargs)
+
+    assert exc.value.error_type == "permanent"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["drop", "report"])
 async def test_validation_judge_error(monkeypatch, action):
     """판정기가 실패하면 drop 은 문서를 실패 처리하고, report 는 기록만 하고 그대로 돌려준다.
