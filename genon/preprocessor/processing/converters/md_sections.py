@@ -127,8 +127,12 @@ def _skip_block(lines: list[str], i: int, is_end) -> int:
     return min(j, len(lines) - 1)
 
 
-def _scan(lines: list[str]) -> list[_Heading]:
-    """ATX 헤딩 목록. 펜스·HTML 주석·원시 HTML·front matter 안의 줄은 건너뛴다."""
+def _scan(lines: list[str], markup: set[int] | None = None) -> list[_Heading]:
+    """ATX 헤딩 목록. 펜스·HTML 주석·원시 HTML·front matter 안의 줄은 건너뛴다.
+
+    ``markup`` 을 넘기면 본문이 아닌 표기 줄(펜스 여닫이, 여러 줄 HTML 주석)의 번호를 채운다.
+    """
+    markup = set() if markup is None else markup
     headings: list[_Heading] = []
     n = len(lines)
     i = _front_matter_end(lines) + 1
@@ -144,10 +148,16 @@ def _scan(lines: list[str]) -> list[_Heading]:
                             and len(close.group("ticks")) >= len(ticks)
                             and not close.group("info").strip())
 
-            i = _skip_block(lines, i, _closes) + 1
+            end = _skip_block(lines, i, _closes)
+            markup.add(i)
+            if end > i and _closes(lines[end].rstrip("\r\n")):
+                markup.add(end)
+            i = end + 1
             continue
         if "<!--" in line and "-->" not in line.split("<!--", 1)[1]:
-            i = _skip_block(lines, i, lambda text: "-->" in text) + 1
+            end = _skip_block(lines, i, lambda text: "-->" in text)
+            markup.update(range(i, end + 1))
+            i = end + 1
             continue
         raw_html = _RAW_HTML_OPEN_RE.match(line)
         if raw_html:
@@ -165,12 +175,12 @@ def _scan(lines: list[str]) -> list[_Heading]:
 
 
 def _has_body(lines: list[str]) -> bool:
-    """헤딩·한 줄 주석·front matter·빈 줄 말고 남은 줄이 있는가."""
-    headings = _scan(lines)
-    heading_idx = {h.index for h in headings}
+    """헤딩·주석·펜스 여닫이·front matter·빈 줄 말고 남은 줄이 있는가."""
+    markup: set[int] = set()
+    skip = markup | {h.index for h in _scan(lines, markup)}
     fm_end = _front_matter_end(lines)
     return any(
-        k > fm_end and k not in heading_idx and line.strip() and not _SINGLE_COMMENT_RE.match(line)
+        k > fm_end and k not in skip and line.strip() and not _SINGLE_COMMENT_RE.match(line)
         for k, line in enumerate(lines)
     )
 

@@ -99,6 +99,14 @@ def test_invalid_config_fails_at_startup(cfg):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("rest", ["<!--\n주석\n-->\n", "```text\n```\n"])
+def test_only_markup_left_counts_as_no_body(rest):
+    """여러 줄 주석이나 빈 펜스만 남아도 본문이 없는 것으로 본다."""
+    with pytest.raises(ValueError, match="남은 본문이 없습니다"):
+        MarkdownSectionsSpec.from_config(PRODUCT_CFG).apply(f"# 상품\n\n## 원문 전사\n\n{rest}")
+
+
+@pytest.mark.unit
 def test_nothing_left_stops_parsing_with_service_error(tmp_path: Path):
     """지운 뒤 본문이 비면 원문으로 되돌리지 않고 파싱 오류로 멈춘다."""
     from genon.preprocessor.processing.core.errors import GenosServiceException
