@@ -980,11 +980,11 @@ async def test_validation_final_check_covers_hook_output(hook):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("values,code", [
-    ({}, "CHUNK_ALL_REJECTED"),
-    ({"fail_on_any": True}, "CHUNK_REJECTED"),
+@pytest.mark.parametrize("values,code,reason_code", [
+    ({}, "CHUNK_ALL_REJECTED", "CHUNK_D002"),
+    ({"fail_on_any": True}, "CHUNK_REJECTED", "CHUNK_D003"),
 ])
-async def test_validation_fails_document(values, code):
+async def test_validation_fails_document(values, code, reason_code):
     """전부 제외되면 문서 실패, fail_on_any 면 불량 청크 하나로 문서 실패."""
     cf = pytest.importorskip("facade.chunking_processor")
     document = _quality_doc(_BAD, _BAD) if not values else _quality_doc(_GOOD, _BAD)
@@ -993,17 +993,18 @@ async def test_validation_fails_document(values, code):
         await _validating(cf.DocumentProcessor(), **values)(None, "", document=document)
 
     assert exc.value.error_msg.startswith(code) and exc.value.error_type == "permanent"
+    assert exc.value.reason_code == reason_code
     assert type(exc.value).__name__ == "ChunkValidationError"    # 코드서빙 응답의 error_type
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kwargs,message", [
-    ({}, "입력이 필요합니다"),
-    ({"document": {"foo": 1}}, "인식할 수 없습니다"),
-    ({"document": {"schema_name": "DoclingDocument", "texts": "broken"}}, "복원 실패"),
+@pytest.mark.parametrize("kwargs,message,reason_code", [
+    ({}, "입력이 필요합니다", "CHUNK_P002"),
+    ({"document": {"foo": 1}}, "인식할 수 없습니다", "CHUNK_P003"),
+    ({"document": {"schema_name": "DoclingDocument", "texts": "broken"}}, "복원 실패", "CHUNK_P004"),
 ])
-async def test_input_errors_are_permanent(kwargs, message):
-    """청커 입력 오류는 다시 시도해도 같으므로 error_kind 가 permanent 로 실린다(#528).
+async def test_input_errors_are_permanent(kwargs, message, reason_code):
+    """청커 입력 오류는 다시 시도해도 같으므로 permanent 이며 사유 코드가 실린다(#528).
 
     실물 파서 산출로 만든 같은 입력은 tools/code_serving 경로로 확인했다. 여기서는 해당
     분기만 타면 되므로 최소 입력을 쓴다.
@@ -1013,7 +1014,7 @@ async def test_input_errors_are_permanent(kwargs, message):
     with pytest.raises(cf.GenosServiceException, match=message) as exc:
         await cf.DocumentProcessor()(None, "", **kwargs)
 
-    assert exc.value.error_type == "permanent"
+    assert (exc.value.error_type, exc.value.reason_code) == ("permanent", reason_code)
 
 
 @pytest.mark.asyncio

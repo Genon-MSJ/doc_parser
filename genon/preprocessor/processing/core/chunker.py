@@ -26,6 +26,7 @@ _log = logging.getLogger(__name__)
 # 그대로 유지해 호출부를 건드리지 않는다. 사이트별 조정 대상 상수(구분자, 최소
 # 청크 크기, 토크나이저 경로)는 이 파일에 남아 있으므로 래퍼가 넘겨준다.
 from genon.preprocessor.processing.common import config_parse as cp
+from genon.preprocessor.processing.common.reason_codes import os_error_reason
 from genon.preprocessor.processing.common import pipeline_setup as ps
 from genon.preprocessor.processing.common import appendix as apx
 from genon.preprocessor.processing.chunking import smart_chunker as sc
@@ -244,7 +245,9 @@ def _classify_payload(obj) -> Tuple[str, Any]:
     가질 수 있으므로 반드시 "document" 를 "elements" 보다 먼저 검사한다.
     """
     if not isinstance(obj, dict):
-        raise GenosServiceException(1, "chunker 입력 형식을 인식할 수 없습니다.", error_type="permanent")
+        raise GenosServiceException(
+            1, "chunker 입력 형식을 인식할 수 없습니다.", error_type="permanent",
+            reason_code="CHUNK_P003")
 
     candidates = [obj]
     data = obj.get("data")
@@ -264,7 +267,7 @@ def _classify_payload(obj) -> Tuple[str, Any]:
         return "docling", obj
     raise GenosServiceException(
         1, "chunker 입력 형식을 인식할 수 없습니다(docling/parse-format 아님).",
-        error_type="permanent",
+        error_type="permanent", reason_code="CHUNK_P003",
     )
 
 
@@ -565,7 +568,8 @@ class ChunkerCore:
         if not vector_metas and rejected:
             raise cq.all_rejected_error(validation)
         if not vector_metas and not notes["dropped"]:
-            raise GenosServiceException(1, "chunk length is 0", error_type="permanent")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
         if notes["dropped"] or rejected:
             # n_chunk_of_doc / page 개수는 루프 전에 계산해 둔 값이라 다시 맞춰야 한다.
             if notes["dropped"]:
@@ -714,7 +718,7 @@ class ChunkerCore:
                 "1",
                 f"행 metadata 를 청크 property 로 변환하지 못했습니다"
                 f"(element #{notes['chunk_idx']}).{hint} {exc}",
-                stage="custom_fields", error_type="permanent",
+                stage="custom_fields", error_type="permanent", reason_code="CHUNK_P001",
             ) from exc
 
     def _docling_vector_meta(self, job, chunk, text: str):
@@ -1178,12 +1182,20 @@ class ChunkerCore:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     raw_payload = json.load(f)
+            except OSError as exc:
+                code, kind = os_error_reason(exc, "CHUNK")
+                raise GenosServiceException(
+                    1, f"chunker 입력 파일 로드 실패({file_path}): {exc}",
+                    error_type=kind, reason_code=code) from exc
             except Exception as exc:
-                raise GenosServiceException(1, f"chunker 입력 파일 로드 실패({file_path}): {exc}") from exc
+                # JSON 문법 손상 등 파서 산출물 자체의 문제다.
+                raise GenosServiceException(
+                    1, f"chunker 입력 파일 로드 실패({file_path}): {exc}",
+                    error_type="permanent", reason_code="CHUNK_P004") from exc
         if not raw_payload:
             raise GenosServiceException(
                 1, "chunker API: 'document'(인라인 JSON) 또는 file_path(.json) 입력이 필요합니다.",
-                error_type="permanent")
+                error_type="permanent", reason_code="CHUNK_P002")
 
         if isinstance(raw_payload, DoclingDocument):
             kind, data = "docling", raw_payload
@@ -1410,7 +1422,8 @@ class ChunkerCore:
                 document: DoclingDocument = DoclingDocument.model_validate(job.data)
         except Exception as exc:
             raise GenosServiceException(
-                1, f"docling document 복원 실패: {exc}", error_type="permanent") from exc
+                1, f"docling document 복원 실패: {exc}", error_type="permanent",
+                reason_code="CHUNK_P004") from exc
 
         has_text_items = False
         for item, _ in document.iterate_items():
@@ -1429,7 +1442,8 @@ class ChunkerCore:
 
         doc_chunks, job.notes["split"] = self._split_documents_ex(document, **job.params)
         if len(doc_chunks) < 1:
-            raise GenosServiceException(1, "chunk length is 0", error_type="permanent")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
         job.document = document
         return _docling_chunks(doc_chunks)
 
@@ -1483,7 +1497,8 @@ class ChunkerCore:
         """행 element 를 행마다 청크 1개로 만든다. 표 분리와 splittable 펼치기까지 한다."""
         rows = [el for el in elements if el.get("category") in self.ROW_CATEGORIES]
         if not rows:
-            raise GenosServiceException(1, "chunk length is 0", error_type="permanent")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
         # 행 element 가 하나라도 있으면 이 경로로 오므로, 섞여 온 비-행 element 는 버려진다.
         # tabular_row 는 외부 파서도 만들 수 있는 일반 이름이라 조용한 축소를 로그로 드러낸다.
         dropped = len(elements) - len(rows)
@@ -1532,7 +1547,8 @@ class ChunkerCore:
             )
 
         if not docs:
-            raise GenosServiceException(1, "chunk length is 0", error_type="permanent")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size, chunk_overlap=chunk_overlap,
@@ -1544,7 +1560,8 @@ class ChunkerCore:
         else:
             chunks = [c for c in chunks if c.page_content]
         if not chunks:
-            raise GenosServiceException(1, "chunk length is 0", error_type="permanent")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
 
         return [jb.Chunk(
             text=c.page_content, kind="text", page=c.metadata.get("page", 1), source=c,

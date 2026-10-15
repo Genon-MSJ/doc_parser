@@ -420,10 +420,19 @@ def judge(text: Optional[str], *, kind: str = "docling", code_like: bool = False
 # 문서 1건의 검증 진행(코어 청커가 쓴다)
 # ---------------------------------------------------------------------------
 
+# 메시지 앞머리 코드 → 응답의 reason_code(#528). 앞머리는 하위호환을 위해 그대로 둔다.
+_REASON_CODES = {
+    CHUNK_ALL_REJECTED: "CHUNK_D002",
+    CHUNK_REJECTED: "CHUNK_D003",
+    CHUNK_VALIDATION_ERROR: "CHUNK_P005",
+}
+
+
 def _error(code: str, message: str) -> ChunkValidationError:
     # 재시도로 해결되지 않는 오류다.
     return ChunkValidationError(
-        "1", f"{code}: {message}", stage=_STAGE, error_type="permanent")
+        "1", f"{code}: {message}", stage=_STAGE, error_type="permanent",
+        reason_code=_REASON_CODES[code])
 
 
 @dataclass

@@ -40,6 +40,7 @@ import yaml
 
 from genon.preprocessor.processing.converters.md_sections import MarkdownSectionsSpec
 from genon.preprocessor.processing.converters.md_text_fence import MarkdownTextFenceSpec
+from genon.preprocessor.processing.common.reason_codes import CodedValueError, reason_of
 
 from .custom_fields_enricher import (
     DOCUMENT_CUSTOM_FIELD_EXTRACTORS,
@@ -86,7 +87,7 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
         for key_node, value_node in node.value:
             key = self.construct_object(key_node, deep=deep)
             if key in mapping:
-                raise ValueError(f"Markdown front matter 중복 키: {key}")
+                raise CodedValueError(f"Markdown front matter 중복 키: {key}", "PARSE_D005")
             mapping[key] = self.construct_object(value_node, deep=deep)
         return mapping
 
@@ -104,7 +105,7 @@ def _normalize_value(
     date_int transform 도 `2026-01-12` 표기를 그대로 받는다.
     """
     if _depth > 32:
-        raise ValueError("Markdown front matter 중첩 깊이가 32를 초과했습니다.")
+        raise CodedValueError("Markdown front matter 중첩 깊이가 32를 초과했습니다.", "PARSE_D007")
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -114,7 +115,7 @@ def _normalize_value(
         memo = _memo if _memo is not None else {}
         value_id = id(value)
         if value_id in active:
-            raise ValueError("Markdown front matter에 순환 YAML alias가 있습니다.")
+            raise CodedValueError("Markdown front matter에 순환 YAML alias가 있습니다.", "PARSE_D006")
         if value_id in memo:
             return memo[value_id]
         active.add(value_id)
@@ -335,9 +336,11 @@ class MarkdownFrontMatterSpec:
 
     def _handle(self, policy: str, message: str, exc: Exception | None = None) -> MarkdownFrontMatterResult:
         if policy == "error":
+            # 원인 예외의 사유 코드(중복 키·순환·중첩)를 잇고, 없으면 형식 오류로 본다(#528).
+            error = CodedValueError(message, reason_of(exc, "PARSE_D005"))
             if exc is not None:
-                raise ValueError(message) from exc
-            raise ValueError(message)
+                raise error from exc
+            raise error
         if policy == "warn":
             _log.warning(message)
         return MarkdownFrontMatterResult(False, {}, "", None)

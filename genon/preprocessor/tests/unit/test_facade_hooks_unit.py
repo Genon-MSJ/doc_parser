@@ -107,7 +107,8 @@ async def test_broken_json_without_hook_still_fails(tmp_path: Path):
     src.write_text("{not json", encoding="utf-8")
     with pytest.raises(core_parser.GenosServiceException) as exc:
         await _bare(parser_facade.DocumentProcessor)._load_json_payload(str(src), "any")
-    assert exc.value.error_type == "permanent"    # 재시도해도 같은 원천 오류다(#528)
+    # 재시도해도 같은 원천 오류다(#528)
+    assert (exc.value.error_type, exc.value.reason_code) == ("permanent", "PARSE_D010")
 
 
 @pytest.mark.asyncio

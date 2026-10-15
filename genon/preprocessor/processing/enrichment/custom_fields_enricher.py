@@ -18,6 +18,7 @@ from docling.utils.llm_cache import CacheDeadlineExceeded, async_cached_call, re
 from docling.utils.thinking import resolve_thinking_kwargs, strip_reasoning
 
 from genon.preprocessor.processing.common import config_parse as cp
+from genon.preprocessor.processing.common.reason_codes import CodedValueError
 from genon.preprocessor.processing.common.model_params import (
     build_chat_payload,
     collect_generation_params,
@@ -1240,7 +1241,8 @@ class CustomFieldsEnricher(BaseEnricher):
             return parsed
 
         if policy == "error":
-            raise ValueError("custom_fields + 표 설명 프롬프트가 model_context_tokens를 초과했습니다.")
+            raise CodedValueError(
+                "custom_fields + 표 설명 프롬프트가 model_context_tokens를 초과했습니다.", "PARSE_P001")
         output = await self._call_llm(raw_text, document)
         parsed = self._parse_with_custom_parser(output, document, **kwargs)
         if policy == "skip":
@@ -1316,7 +1318,8 @@ class CustomFieldsEnricher(BaseEnricher):
 
         policy = self._table_description_options.overflow_policy
         if policy == "error":
-            raise ValueError("표 설명 프롬프트가 model_context_tokens 를 초과했습니다.")
+            raise CodedValueError(
+                "표 설명 프롬프트가 model_context_tokens 를 초과했습니다.", "PARSE_P001")
         if policy == "skip":
             _log.warning("표 설명 프롬프트가 한도를 초과해 표 설명을 건너뜁니다.")
             return

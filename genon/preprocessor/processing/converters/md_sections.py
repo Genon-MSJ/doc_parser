@@ -44,6 +44,7 @@ import fnmatch
 import re
 from dataclasses import dataclass
 from typing import Any
+from genon.preprocessor.processing.common.reason_codes import CodedValueError
 
 _ATX_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<title>.*?))?(?:[ \t]+#+)?[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<ticks>`{3,}|~{3,})(?P<info>.*)$")
@@ -288,9 +289,10 @@ def transform(
     if not removed:
         return text, 0
     if not _has_body(lines):
-        raise ValueError(
+        raise CodedValueError(
             "markdown.sections 적용 후 남은 본문이 없습니다. after_heading/exclude 설정이 "
-            "문서 구조와 맞는지 확인하세요."
+            "문서 구조와 맞는지 확인하세요.",
+            "PARSE_D012",
         )
     out = "".join(lines)
     if trailing_added and out.endswith("\n"):

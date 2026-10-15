@@ -1629,6 +1629,9 @@ facade의 `GenosSmartChunker` ClassVar는 청크 표기 방식을 정합니다.
 - 실패 응답에는 `error_code`, `error_type`, `stage`, `error_kind`, `tag`, `file_path`, `traceback`이
   실립니다(`stage`·`error_kind`는 값이 있을 때만). `error_type`은 예외 클래스명이고, 예외 생성자에
   준 `error_type` 인자는 응답에서 `error_kind`로 나갑니다.
+- 실패 응답에는 사유 코드 `reason_code`(예: `PARSE_D001`)와 유형 `error_category`(`data`/`preprocess`/`system`)도
+  항상 실립니다. 예외 생성자에 `reason_code` 인자를 주면 그 값이 실리고, 주지 않으면 미분류 코드(`PARSE_P999` 등)가
+  실립니다. 코드표는 `custom_fields_exceptions.md` 의 "사유 코드" 절을 참조하세요.
 - facade가 `GenosServiceException`으로 던진 오류는 `error_code`가 보존됩니다. 그 외 예외는
   타입에 따라 `INPUT_ERROR` / `TIMEOUT_ERROR` / `INTERNAL_ERROR`로 자동 분류됩니다.
 - core가 넣는 `stage` 값은 `custom_fields` · `doc_summary` · `image_description` · `metadata` ·

@@ -25,6 +25,7 @@ from typing import Any, ClassVar
 import yaml
 
 from genon.preprocessor.processing.common import config_parse as cp
+from genon.preprocessor.processing.common.reason_codes import CodedValueError
 from genon.preprocessor.processing.enrichment import config_schema as cs
 from genon.preprocessor.processing.enrichment import config_v2 as cv2
 
@@ -1468,7 +1469,7 @@ class TabularCustomFieldsMapper(CustomFieldsMapperBase):
                 normalized[key] = header
         if collisions:
             detail = ", ".join(f"{key}={values}" for key, values in collisions.items())
-            raise ValueError(f"정규화 후 중복되는 Excel 컬럼이 있습니다: {detail}")
+            raise CodedValueError(f"정규화 후 중복되는 Excel 컬럼이 있습니다: {detail}", "PARSE_D004")
         return normalized
 
     def _resolve_columns(self, row: dict) -> dict[str, str | None]:
@@ -1574,9 +1575,10 @@ class TabularCustomFieldsMapper(CustomFieldsMapperBase):
                         f"필수 컬럼 {sorted(missing_columns)} 없음; available={available}"
                     )
                     continue
-                raise ValueError(
+                raise CodedValueError(
                     f"필수 Excel 컬럼 매핑 실패(sheet={sheet_name}): {sorted(missing_columns)}; "
-                    f"available={available}"
+                    f"available={available}",
+                    "PARSE_D001",
                 )
 
             # 1단계 — 원시 매핑. 원본 row 도 함께 들고 간다(폴백 본문·병합 재료).
