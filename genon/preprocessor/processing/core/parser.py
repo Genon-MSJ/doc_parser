@@ -65,6 +65,7 @@ from genon.preprocessor.processing.enrichment.json_semantic import (
 from genon.preprocessor.processing.enrichment.markdown_front_matter import (
     build_markdown_front_matter_specs,
     build_markdown_text_fence_specs,
+    build_markdown_sections_specs,
     build_html_marker_heading_doc_types,
     build_markdown_marker_heading_doc_types,
 )
@@ -624,6 +625,9 @@ class ParserCore:
         # (안 하면 펜스 본문 전체가 CodeItem 하나가 되어 chunk_size 가 무의미해진다).
         self._markdown_text_fence_specs = _guard(
             "markdown.text_fence", build_markdown_text_fence_specs, cf_cfgs)
+        # markdown.sections = 헤딩 기준으로 청크 본문에 넣을 섹션을 고른다(생성 안내 섹션 제외 등).
+        self._markdown_sections_specs = _guard(
+            "markdown.sections", build_markdown_sections_specs, cf_cfgs)
         # html.marker_headings = h태그 없이 도형 마커로만 계층을 표현하는 원천에서 그 마커
         # 줄을 섹션 헤더로 승격한다. 대상 doc_type 이 아니면 사유 계산 자체를 켜지 않는다.
         self._html_marker_heading_doc_types = _guard(
@@ -683,6 +687,11 @@ class ParserCore:
         """런타임 doc_type 에 매칭되는 text_fence 설정. 없으면 None(전처리 없이 파싱)."""
         return self._single_json_match(
             self._markdown_text_fence_specs, runtime_doc_type, "markdown.text_fence")
+
+    def _markdown_sections_spec_for(self, runtime_doc_type: Any):
+        """런타임 doc_type 에 매칭되는 sections 설정. 없으면 None(섹션 선택 없이 파싱)."""
+        return self._single_json_match(
+            getattr(self, "_markdown_sections_specs", ()), runtime_doc_type, "markdown.sections")
 
     def _html_marker_headings_enabled(self, runtime_doc_type: Any) -> bool:
         """런타임 doc_type 이 마커 승격 대상인지."""
@@ -881,11 +890,12 @@ class ParserCore:
 
     @staticmethod
     def _prepare_markdown(
-        file_path: str, work_dir: str, fm_spec, fence_spec, marker_headings: bool = False
+        file_path: str, work_dir: str, fm_spec, fence_spec, marker_headings: bool = False,
+        *, sections_spec=None,
     ) -> tuple[str, dict]:
-        """Front matter / text_fence 전처리를 적용한 파싱 경로와 enrichment context를 반환.
+        """Front matter / sections / text_fence 전처리를 적용한 파싱 경로와 enrichment context를 반환.
 
-        둘 중 하나라도 텍스트를 바꿨을 때만 파생 파일을 쓴다. 바뀐 것이 없으면 원본 경로를
+        하나라도 텍스트를 바꿨을 때만 파생 파일을 쓴다. 바뀐 것이 없으면 원본 경로를
         그대로 돌려주므로 docling 입력은 물론 artifacts 경로도 기존과 동일하다.
         """
         context: dict = {}
@@ -905,6 +915,29 @@ class ParserCore:
                     "source_fields": list(parsed.source_fields),
                 }
                 text = parsed.filtered_text
+
+        if sections_spec is not None:
+            # front matter 다음, text_fence 전에 돈다 — 원본 펜스가 남아 있어야 펜스 안의
+            # '#' 줄을 헤딩으로 오인하지 않는다.
+            source = text
+            if source is None:
+                try:
+                    source = Path(file_path).read_text(encoding="utf-8-sig")
+                except (OSError, UnicodeError) as exc:
+                    _log.warning(f"[DocumentProcessor] markdown.sections 입력 읽기 실패: {exc}")
+                    return file_path, context
+            try:
+                selected, removed = sections_spec.apply(source)
+            except ValueError as exc:
+                raise GenosServiceException(
+                    "1", f"{exc} ({Path(file_path).name})", stage="custom_fields"
+                ) from exc
+            if removed:
+                _log.info(
+                    f"[DocumentProcessor] markdown.sections: 헤딩 {removed}개 기준으로 섹션을 "
+                    f"제외 ({Path(file_path).name})"
+                )
+                text = selected
 
         if fence_spec is not None:
             source = text
@@ -1754,14 +1787,16 @@ class ParserCore:
             fm_spec = self._markdown_front_matter_spec_for(doc_type)
             fence_spec = self._markdown_text_fence_spec_for(doc_type)
             marker_on = self._markdown_marker_headings_enabled(doc_type)
-            if fm_spec is None and fence_spec is None and not marker_on:
+            sections_spec = self._markdown_sections_spec_for(doc_type)
+            if fm_spec is None and fence_spec is None and not marker_on and sections_spec is None:
                 parse_path, artifacts_from = path, artifacts_source
             else:
                 # front matter를 제외하거나 ```text 펜스를 단락으로 되돌린 파생
                 # Markdown은 임시 파일로만 사용한다. 선택 metadata와 제외된 원문은
                 # custom-fields 후처리에 별도 전달한다.
                 parse_path, front_matter_context = self._prepare_markdown(
-                    path, job.temp_dir("parser_md_"), fm_spec, fence_spec, marker_on
+                    path, job.temp_dir("parser_md_"), fm_spec, fence_spec, marker_on,
+                    sections_spec=sections_spec,
                 )
                 artifacts_from = artifacts_source or (path if parse_path != path else None)
                 job.params = {**job.params, "_markdown_front_matter": front_matter_context}
