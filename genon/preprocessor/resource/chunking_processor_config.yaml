@@ -105,6 +105,10 @@ chunking:
   validation:
     enable: true
     action: drop
+    # 출력 청크 글자 수 상한. 넘은 청크는 버리지 않고 응답 chunk_validation.max_length 와 로그로 알린다.
+    # 0(기본)이면 검사하지 않는다. 임베딩 모델 입력 한도(토큰)를 글자 수로 환산해, 한도보다 조금 낮게 둔다.
+    # 글자 수는 HEADER: 등 접두를 포함한 최종 본문 기준이다. by_doc_type 으로 문서유형별로 다르게 둘 수 있다.
+    # max_chars: 7000
 
 # table_image
 # 표를 이미지로 잘라 저장하고 media_files 에 type='table_image' 로 기록할지 여부.
