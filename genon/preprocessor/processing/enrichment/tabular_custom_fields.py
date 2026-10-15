@@ -189,7 +189,7 @@ def validate_target_field_names(targets: Any, *, label: str) -> None:
 # ignore_keys/shared_fields/sections 는 json_semantic(SemanticJsonMapper) 전용 키다.
 _LIST_SHAPED_KEYS = (
     "required", "text_fields", "chunk_prefix_fields", "ignore_keys",
-    "required_shared_fields",
+    "required_shared_fields", "sheets",
 )
 _MAP_SHAPED_KEYS = (
     "column_map", "key_map", "collect_key_map", "constants", "defaults", "value_map", "transforms",
@@ -393,6 +393,17 @@ def collect_target_field_names(cfg: dict) -> set[str]:
 #
 # 이름은 원천 컬럼명이 아니라 **목표필드명**을 쓴다(column_map 을 거친 뒤 이름). yaml 안에서
 # 어휘를 하나로 유지하려는 것이고, 오타는 아래 검증이 기동 시에 잡는다.
+
+
+def compile_sheets(cfg: dict, *, label: str) -> list[str] | None:
+    """`source.sheets`(처리 대상 시트 이름 목록)를 검증한다. 미선언이면 None(= 모든 시트)."""
+    spec = cfg.get("sheets")
+    if spec is None:
+        return None
+    names = [str(name).strip() for name in spec]
+    if not names or not all(names):
+        raise ValueError(f"{label}: source.sheets 에는 비어 있지 않은 시트 이름을 하나 이상 적어야 합니다.")
+    return names
 
 
 def compile_row_merge(cfg: dict, *, label: str) -> dict | None:
@@ -1454,6 +1465,8 @@ class TabularCustomFieldsMapper(CustomFieldsMapperBase):
 
         # 여러 행에 쪼개져 오는 값을 한 레코드로 접는다(미선언이면 종전대로 행 1개 = 레코드 1개).
         self.row_merge = compile_row_merge(self.config, label=label)
+        # 처리할 시트(미선언이면 모든 시트). 지정한 시트가 없으면 원천 오류다(#528).
+        self.sheets = compile_sheets(self.config, label=label)
 
     @staticmethod
     def _header_index(row: dict) -> dict[str, str]:
@@ -1551,9 +1564,17 @@ class TabularCustomFieldsMapper(CustomFieldsMapperBase):
 
         fields_list: list[dict] = []
         sheets = data_dict.get("data", []) or []
+        names = [str(sheet.get("sheet_name") or f"sheet_{idx + 1}") for idx, sheet in enumerate(sheets)]
+        if self.sheets is not None:
+            absent = [name for name in self.sheets if name not in names]
+            if absent:
+                raise CodedValueError(
+                    f"지정한 시트가 없습니다(source.sheets): {absent}; available={names}", "PARSE_D013")
         for sheet_idx, sheet in enumerate(sheets):
             page = sheet_idx + 1
-            sheet_name = str(sheet.get("sheet_name") or f"sheet_{page}")
+            sheet_name = names[sheet_idx]
+            if self.sheets is not None and sheet_name not in self.sheets:
+                continue
             rows = sheet.get("data_rows", []) or []
             resolved = self._resolve_columns(rows[0]) if rows else {
                 str(target): None for target in column_map

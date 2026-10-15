@@ -43,6 +43,12 @@ def _resource_copy() -> Path:
     cfg["source"]["pre"]["markdown"]["front_matter"]["on_invalid"] = "error"
     path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
+    # 용어사전은 실물 시트 이름으로 처리 대상 시트를 지정한다(source.sheets).
+    path = dst / "custom_field_term.yaml"
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    cfg["source"]["sheets"] = ["공통_용어사전"]
+    path.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
     path = dst / "parser_processor_config.yaml"
     cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
     for item in cfg["enrichment"]:
@@ -127,6 +133,15 @@ def _derived_inputs() -> dict:
     out["slf_no_body"].parent.mkdir()
     out["slf_no_body"].write_text(head, encoding="utf-8")
 
+    # 용어사전 시트 뒤에 메뉴 시트를 붙인 통합 문서. 메뉴 시트에는 용어사전 필수 열이 없다.
+    book = openpyxl.load_workbook(MONIMO / "monimo_term_sample.xlsx")
+    menu = openpyxl.load_workbook(MONIMO / "monimo_menu_sample.xlsx").active
+    extra = book.create_sheet(menu.title)
+    for row in menu.iter_rows(values_only=True):
+        extra.append(row)
+    out["term_plus_menu"] = WORK / "monimo_term_plus_menu.xlsx"
+    book.save(out["term_plus_menu"])
+
     out["locked_json"] = WORK / "locked.json"
     out["locked_json"].write_text("{}", encoding="utf-8")
     out["locked_json"].chmod(0)
@@ -170,6 +185,8 @@ def main() -> int:
          {"doc_type": "cs_ssf"}, "PARSE_D011", "permanent"),
         ("섹션 선택 후 본문 없음", "/parser", src["slf_no_body"],
          {"doc_type": "product_slf"}, "PARSE_D012", "permanent"),
+        ("지정한 시트 없음(메뉴 엑셀을 term 으로)", "/parser", MONIMO / "monimo_menu_sample.xlsx",
+         {"doc_type": "term"}, "PARSE_D013", "permanent"),
         ("미등록 doc_type", "/parser", MONIMO / "monimo_product_ssf_sample.md",
          {"doc_type": "no_such_type"}, "PARSE_P002", "permanent"),
         ("청커 입력 누락", "/chunker", "", {}, "CHUNK_P002", "permanent"),
@@ -207,6 +224,16 @@ def main() -> int:
               f"stage={body.get('stage')}"
               + ("" if ok else f"  기대={want_code}/{want_kind}  errMsg={str(body.get('errMsg'))[:120]}"))
     cases += llm_cases
+
+    # 시트 지정: 메뉴 시트가 붙은 통합 문서도 지정한 용어사전 시트만 처리해 성공한다.
+    alone = post("/parser", MONIMO / "monimo_term_sample.xlsx", {"doc_type": "term"})
+    mixed = post("/parser", src["term_plus_menu"], {"doc_type": "term"})
+    counts = [len((b.get("data") or {}).get("elements") or []) for b in (alone, mixed)]
+    ok = alone.get("code") == mixed.get("code") == 0 and counts[0] == counts[1] > 0
+    failures += not ok
+    print(f"[{'PASS' if ok else 'FAIL'}] 시트 지정(용어사전+메뉴 통합 문서): elements={counts} "
+          f"errMsg={str(mixed.get('errMsg'))[:80]}")
+    cases.append("sheets")
 
     # 요청 형식 오류는 라우트 함수에 닿기 전에 FastAPI 가 거부한다.
     body = client.post("/parser", json={"params": {}}).json()

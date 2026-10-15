@@ -1529,6 +1529,7 @@ rows·records 의 `body.fields`·`body.repeat` 값이 JSON·HTML 이면 본문�
 | 레코드 배열 위치 | `source.records_at` (`records`) | ✗ | ✔ | ✗ | ✗ |
 | 못 찾을 때 정책 | `source.on_missing` (`missing_policy`) | ✗ | ✔ | ✔ | ✗ |
 | 여러 행 접기 | `source.merge_rows` (`row_merge`) | ✔ | ✔ | ✗ | ✗ |
+| 처리 대상 시트⁶ | `source.sheets` | ✔ | ✗ | ✗ | ✗ |
 | 섹션 표시 이름 | `source.sections` | ✗ | ✗ | ✔ | ✗ |
 | 서브트리 제외 | `source.ignore_keys` | ✗ | ✗ | ✔ | ✗ |
 | 포맷 전처리 | `source.pre.markdown` / `.html` | ⚠ **무시** | ⚠ **무시** | ⚠ **무시** | ✔ |
@@ -1542,6 +1543,10 @@ rows·records 의 `body.fields`·`body.repeat` 값이 JSON·HTML 이면 본문�
 
 ⁵ `llm_fields` 로 묶이는 것은 rows·records·sections 뿐입니다. document 는 항목이 **최상위 키로
 펼쳐져** `output_fields`·`system_prompt`·`user_prompt` 같은 이름으로 오류 메시지에 나옵니다.
+
+⁶ `source.sheets: [시트이름, …]` 를 적으면 그 시트만 처리하고 나머지 시트는 건너뜁니다. 적은 시트가
+워크북에 없으면 `PARSE_D013` 으로 실패합니다. 생략하면 모든 시트를 처리합니다(종전 동작). CSV 는
+시트 이름이 `table_1` 하나뿐이라 이 키를 쓰지 않습니다.
 
 > **청크 텍스트 정제(`chunking.text_cleanup`)는 doc_type 별 설정이 아니라 프로세서 config** 입니다.
 > `parser_processor_config.yaml` 에는 없습니다 — 파서와 청커를 나눠 배포했다면 **청커 쪽 yaml** 에 적습니다.

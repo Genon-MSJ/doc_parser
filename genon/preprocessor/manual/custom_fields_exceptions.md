@@ -75,6 +75,7 @@ raw 예외**(마크다운 머리말 오류 등)뿐입니다.
 | `PARSE_D010` | permanent | JSON 문법 손상 |
 | `PARSE_D011` | permanent | 구분자로 나뉜 레코드가 없음 |
 | `PARSE_D012` | permanent | `markdown.sections` 적용 후 본문 없음 |
+| `PARSE_D013` | permanent | `source.sheets` 로 지정한 시트가 워크북에 없음 |
 | `PARSE_P001` | permanent | LLM 입력 길이 사전 검사 초과 |
 | `PARSE_P002` | permanent | 등록되지 않은 doc_type(`defaults.unknown_doc_type: fail`) |
 | `PARSE_P003` | permanent | 같은 doc_type 에 설정이 여러 개 |

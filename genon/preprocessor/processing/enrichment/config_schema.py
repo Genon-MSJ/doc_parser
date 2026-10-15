@@ -74,7 +74,7 @@ _RECORD_COMMON = frozenset({
 EXTRACTOR_KEYS: dict[str, frozenset[str]] = {
     # `sequence`(v2 `fields.<이름>.seq`)는 레코드 루프가 있는 두 kind 전용이다. 섹션형·문서형은
     # "항목 N번째"가 정의되지 않아(문서형은 항상 1) 여기 넣지 않는다.
-    "tabular_mapping": _RECORD_COMMON | {"column_map", "row_merge", "sequence"},
+    "tabular_mapping": _RECORD_COMMON | {"column_map", "row_merge", "sequence", "sheets"},
     # `raw_fields` 는 JSON 원천 2종에만 있다. 엑셀 칸(rows)과 LLM 응답(document)에는
     # "객체를 구조로 볼지 값으로 볼지" 라는 판정 자체가 없다.
     "json_mapping": _RECORD_COMMON | {

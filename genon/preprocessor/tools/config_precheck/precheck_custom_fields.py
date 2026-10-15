@@ -53,6 +53,7 @@ from genon.preprocessor.processing.enrichment.tabular_custom_fields import (  # 
     compile_derive,
     compile_meta_exclude,
     compile_pack,
+    compile_sheets,
     compile_transforms,
     validate_custom_field_config,
 )
@@ -256,6 +257,8 @@ def check_startup_compile(label: str, cfg: dict, extractor: str) -> list[str]:
             c, label=label, extractor=extractor))
     if extractor == "html_select":
         checks.append(html_select.compile_selectors)
+    if extractor == "tabular_mapping":
+        checks.append(compile_sheets)
     problems: list[str] = []
     for check in checks:
         try:
