@@ -74,7 +74,7 @@ FIELD_SPEC_KEYS = frozenset({
 })
 SOURCE_KEYS = frozenset({
     "kind", "records_at", "table_at", "on_missing", "merge_rows",
-    "sections", "ignore_keys", "pre",
+    "sections", "ignore_keys", "sheets", "pre",
 })
 BODY_KEYS = frozenset({"fields", "labels", "split", "repeat", "once", "mirror_to"})
 # source.pre 아래 쓸 수 있는 원천 포맷 전처리 블록(파서가 소비한다).
@@ -152,6 +152,7 @@ _SOURCE_TO_V1 = {
     "records_at": ("records", ("records",)),
     "on_missing": ("missing_policy", ("records", "sections")),
     "merge_rows": ("row_merge", ("rows", "records")),
+    "sheets": ("sheets", ("rows",)),
     "sections": ("sections", ("sections",)),
     "ignore_keys": ("ignore_keys", ("sections",)),
 }

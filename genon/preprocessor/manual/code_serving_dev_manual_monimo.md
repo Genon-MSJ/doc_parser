@@ -1679,6 +1679,7 @@ rows·records의 `body.fields`·`body.repeat` 값이 JSON·HTML이면 본문에�
 | 레코드 배열 위치 | `source.records_at` (`records`) | ✗ | ✔ | ✗ | ✗ | ✗ |
 | 못 찾을 때 정책 | `source.on_missing` (`missing_policy`) | ✗ | ✔ | ✔ | ✗ | ✗ |
 | 여러 건 접기 | `source.merge_rows` (`row_merge`) | ✔ | ✔ | ✗ | ✗ | ✗ |
+| 처리 대상 시트 | `source.sheets` | ✔ | ✗ | ✗ | ✗ | ✗ |
 | 섹션 표시 이름 | `source.sections` | ✗ | ✗ | ✔ | ✗ | ✗ |
 | 서브트리 제외 | `source.ignore_keys` | ✗ | ✗ | ✔ | ✗ | ✗ |
 | 포맷 전처리 | `source.pre.markdown` / `.html` | ⚠ **무시** | ⚠ **무시** | ⚠ **무시** | ✔ | ⚠ `.html` 적용, `.markdown` 무시 |

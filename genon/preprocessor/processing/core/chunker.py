@@ -26,6 +26,7 @@ _log = logging.getLogger(__name__)
 # 그대로 유지해 호출부를 건드리지 않는다. 사이트별 조정 대상 상수(구분자, 최소
 # 청크 크기, 토크나이저 경로)는 이 파일에 남아 있으므로 래퍼가 넘겨준다.
 from genon.preprocessor.processing.common import config_parse as cp
+from genon.preprocessor.processing.common.reason_codes import os_error_reason
 from genon.preprocessor.processing.common import pipeline_setup as ps
 from genon.preprocessor.processing.common import appendix as apx
 from genon.preprocessor.processing.chunking import smart_chunker as sc
@@ -244,7 +245,9 @@ def _classify_payload(obj) -> Tuple[str, Any]:
     가질 수 있으므로 반드시 "document" 를 "elements" 보다 먼저 검사한다.
     """
     if not isinstance(obj, dict):
-        raise GenosServiceException(1, "chunker 입력 형식을 인식할 수 없습니다.")
+        raise GenosServiceException(
+            1, "chunker 입력 형식을 인식할 수 없습니다.", error_type="permanent",
+            reason_code="CHUNK_P003")
 
     candidates = [obj]
     data = obj.get("data")
@@ -263,7 +266,8 @@ def _classify_payload(obj) -> Tuple[str, Any]:
     if "body" in obj or "schema_name" in obj or "texts" in obj:
         return "docling", obj
     raise GenosServiceException(
-        1, "chunker 입력 형식을 인식할 수 없습니다(docling/parse-format 아님)."
+        1, "chunker 입력 형식을 인식할 수 없습니다(docling/parse-format 아님).",
+        error_type="permanent", reason_code="CHUNK_P003",
     )
 
 
@@ -564,7 +568,8 @@ class ChunkerCore:
         if not vector_metas and rejected:
             raise cq.all_rejected_error(validation)
         if not vector_metas and not notes["dropped"]:
-            raise GenosServiceException(1, "chunk length is 0")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
         if notes["dropped"] or rejected:
             # n_chunk_of_doc / page 개수는 루프 전에 계산해 둔 값이라 다시 맞춰야 한다.
             if notes["dropped"]:
@@ -658,9 +663,14 @@ class ChunkerCore:
         vector_meta = (self._record_vector_meta(job, chunk, text) if chunk.kind != "docling"
                        else self._docling_vector_meta(job, chunk, text))
         notes["chunk_index_on_page"] += 1
+        # 파서가 실어 보낸 메타 중 이 청크에 그대로 실려야 하는 값. 최종 출력과 대조한다(#528).
+        expected = (notes.pop("row_expected_meta", None) if chunk.kind != "docling"
+                    else {key: value for key, value in (notes.get("doc_expected_meta") or {}).items()
+                          if key not in notes["chunk_fields"]})   # edit_chunk 값은 의도된 변경
         if notes.get("validation") is not None:
             notes["validation"].remember(
-                vector_meta, chunk, notes.get("chunk_prefix", ""), notes["chunk_idx"])
+                vector_meta, chunk, notes.get("chunk_prefix", ""), notes["chunk_idx"],
+                expected=expected)
         return vector_meta
 
     def _record_vector_meta(self, job, chunk, text: str):
@@ -682,26 +692,32 @@ class ChunkerCore:
         # meta: false 필드를 여기서 뺀다 — 값 조립은 이미 끝났고 남은 것은 적재뿐이다.
         record_meta = cp.strip_meta_excluded(record_meta)
         page = notes["chunk_page"]
+        merged = {
+            **record_meta,  # 목표 필드(question/answer_text/...) + doc_type. extra=allow 로 보존.
+            **notes["variant_values"],
+            'has_table': notes["has_table"],
+            'text': text,
+            'n_char': len(text),
+            'n_word': len(text.split()),
+            'n_line': len(text.splitlines()),
+            'i_page': page,
+            'e_page': page,
+            'i_chunk_on_page': notes["chunk_index_on_page"],
+            'n_chunk_of_page': notes["page_chunk_counts"][page],
+            'i_chunk_on_doc': notes["chunk_idx"],
+            **row_only,
+            'guardrail_categories': (
+                sorted(notes["chunk_cats"]) if notes["chunk_cats"] else None),
+            **notes["global_metadata"],
+            **notes["chunk_fields"],  # edit_chunk 가 info["fields"] 로 넘긴 청크별 값
+        }
+        # 행 메타(목표 필드)는 청크에 그대로 실려야 한다. edit_chunk 가 넘긴 값은 고객이 의도한
+        # 변경이므로 대조하지 않는다(#528).
+        notes["row_expected_meta"] = {
+            key: value for key, value in record_meta.items()
+            if value is not None and key not in notes["chunk_fields"]}
         try:
-            return self.VECTOR_META.model_validate({
-                **record_meta,  # 목표 필드(question/answer_text/...) + doc_type. extra=allow 로 보존.
-                **notes["variant_values"],
-                'has_table': notes["has_table"],
-                'text': text,
-                'n_char': len(text),
-                'n_word': len(text.split()),
-                'n_line': len(text.splitlines()),
-                'i_page': page,
-                'e_page': page,
-                'i_chunk_on_page': notes["chunk_index_on_page"],
-                'n_chunk_of_page': notes["page_chunk_counts"][page],
-                'i_chunk_on_doc': notes["chunk_idx"],
-                **row_only,
-                'guardrail_categories': (
-                    sorted(notes["chunk_cats"]) if notes["chunk_cats"] else None),
-                **notes["global_metadata"],
-                **notes["chunk_fields"],  # edit_chunk 가 info["fields"] 로 넘긴 청크별 값
-            })
+            return self.VECTOR_META.model_validate(merged)
         except Exception as exc:
             # 목표필드명이 예약 필드(title/created_date/appendix)와 겹치면 타입 검증에 걸린다.
             # 그대로 두면 pydantic ValidationError 가 raw 로 올라가 stage 도 없고, ValueError
@@ -713,7 +729,7 @@ class ChunkerCore:
                 "1",
                 f"행 metadata 를 청크 property 로 변환하지 못했습니다"
                 f"(element #{notes['chunk_idx']}).{hint} {exc}",
-                stage="custom_fields",
+                stage="custom_fields", error_type="permanent", reason_code="CHUNK_P001",
             ) from exc
 
     def _docling_vector_meta(self, job, chunk, text: str):
@@ -899,6 +915,15 @@ class ChunkerCore:
         )
         global_metadata.update(typed_values)  # 설정 기반 typed 필드 (created_date 등)
         global_metadata.update(passthrough_metadata)
+        # 문서 메타는 모든 청크에 같은 값으로 실려야 한다. 최종 출력과 대조한다(#528).
+        # 제어 키와 transform 이 소비한 키는 의도된 제거라 대조하지 않는다.
+        control_keys = {cp.BODY_FIELDS_KEY, cp.CHUNK_PREFIX_FIELDS_KEY, cp.FIRST_CHUNK_FIELDS_KEY,
+                        cp.FIELD_LABELS_KEY} | set(tv.field_names()) | consumed_keys
+        # body_fields 에 오른 필드는 청크 본문으로 바뀌는 것이 계약이라 대조하지 않는다.
+        doc_expected_meta = {
+            key: serialize_metadata_value_for_output(value)
+            for key, value in cp.strip_meta_excluded(merged_metadata).items()
+            if value is not None and key not in control_keys and key not in _body_fields}
         # 비-PDF 입력이 변환된 경우 vector 의 file_path 를 변환 PDF 경로로 set.
         if converted_pdf_path:
             global_metadata['file_path'] = converted_pdf_path
@@ -918,6 +943,7 @@ class ChunkerCore:
             first_prefix_pending=bool(_first_prefix_text),
             appendix_list=appendix_list,
             global_metadata=global_metadata,
+            doc_expected_meta=doc_expected_meta,
             # 문서형은 표 변형을 table_variants 기록부로 만든다. 반복문이 형식을 가리지 않게
             # 같은 키를 두되 이 경로에서는 쓰이지 않는다.
             variant_options={},
@@ -1173,15 +1199,25 @@ class ChunkerCore:
         raw_payload = kwargs.get("document")
         if raw_payload is None:
             raw_payload = kwargs.get("docling_document")
-        if not raw_payload and file_path and file_path.lower().endswith(".json") and os.path.isfile(file_path):
+        if not raw_payload and file_path and file_path.lower().endswith(".json"):
+            # 없는 경로도 열어 보고 OSError 로 파일 오류(S003)를 매긴다(#528).
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     raw_payload = json.load(f)
+            except OSError as exc:
+                code, kind = os_error_reason(exc, "CHUNK")
+                raise GenosServiceException(
+                    1, f"chunker 입력 파일 로드 실패({file_path}): {exc}",
+                    error_type=kind, reason_code=code) from exc
             except Exception as exc:
-                raise GenosServiceException(1, f"chunker 입력 파일 로드 실패({file_path}): {exc}") from exc
+                # JSON 문법 손상 등 파서 산출물 자체의 문제다.
+                raise GenosServiceException(
+                    1, f"chunker 입력 파일 로드 실패({file_path}): {exc}",
+                    error_type="permanent", reason_code="CHUNK_P004") from exc
         if not raw_payload:
             raise GenosServiceException(
-                1, "chunker API: 'document'(인라인 JSON) 또는 file_path(.json) 입력이 필요합니다.")
+                1, "chunker API: 'document'(인라인 JSON) 또는 file_path(.json) 입력이 필요합니다.",
+                error_type="permanent", reason_code="CHUNK_P002")
 
         if isinstance(raw_payload, DoclingDocument):
             kind, data = "docling", raw_payload
@@ -1407,7 +1443,9 @@ class ChunkerCore:
             else:
                 document: DoclingDocument = DoclingDocument.model_validate(job.data)
         except Exception as exc:
-            raise GenosServiceException(1, f"docling document 복원 실패: {exc}") from exc
+            raise GenosServiceException(
+                1, f"docling document 복원 실패: {exc}", error_type="permanent",
+                reason_code="CHUNK_P004") from exc
 
         has_text_items = False
         for item, _ in document.iterate_items():
@@ -1426,7 +1464,8 @@ class ChunkerCore:
 
         doc_chunks, job.notes["split"] = self._split_documents_ex(document, **job.params)
         if len(doc_chunks) < 1:
-            raise GenosServiceException(1, "chunk length is 0")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
         job.document = document
         return _docling_chunks(doc_chunks)
 
@@ -1480,7 +1519,8 @@ class ChunkerCore:
         """행 element 를 행마다 청크 1개로 만든다. 표 분리와 splittable 펼치기까지 한다."""
         rows = [el for el in elements if el.get("category") in self.ROW_CATEGORIES]
         if not rows:
-            raise GenosServiceException(1, "chunk length is 0")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
         # 행 element 가 하나라도 있으면 이 경로로 오므로, 섞여 온 비-행 element 는 버려진다.
         # tabular_row 는 외부 파서도 만들 수 있는 일반 이름이라 조용한 축소를 로그로 드러낸다.
         dropped = len(elements) - len(rows)
@@ -1529,7 +1569,8 @@ class ChunkerCore:
             )
 
         if not docs:
-            raise GenosServiceException(1, "chunk length is 0")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size, chunk_overlap=chunk_overlap,
@@ -1541,7 +1582,8 @@ class ChunkerCore:
         else:
             chunks = [c for c in chunks if c.page_content]
         if not chunks:
-            raise GenosServiceException(1, "chunk length is 0")
+            raise GenosServiceException(
+                1, "chunk length is 0", error_type="permanent", reason_code="CHUNK_D001")
 
         return [jb.Chunk(
             text=c.page_content, kind="text", page=c.metadata.get("page", 1), source=c,
