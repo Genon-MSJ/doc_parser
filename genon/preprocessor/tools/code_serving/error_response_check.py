@@ -24,6 +24,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def _resource_copy() -> Path:
     return dst
 
 
-# 모의 LLM 서버. _LLM_MODE 값으로 응답을 고른다: 상태 번호 또는 "close"(연결 끊기).
+# 모의 LLM 서버. _LLM_MODE 값으로 응답을 고른다: 상태 번호, "close"(연결 끊기), "slow"(3초 뒤 503).
 _LLM_MODE = {"value": 503}
 
 
@@ -82,6 +83,9 @@ class _MockLLM(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         mode = _LLM_MODE["value"]
+        if mode == "slow":
+            time.sleep(3)
+            mode = 503
         if mode == "close":
             self.close_connection = True
             self.connection.close()
@@ -237,6 +241,11 @@ def main() -> int:
         ("입력 파일 권한 거부", "/chunker", src["locked_json"], {}, "CHUNK_S003", "permanent"),
     ]
 
+    # chmod 로 만든 권한 거부는 root 로 실행하면 재현되지 않는다. 그때는 해당 사례를 뺀다.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        print("[SKIP] root 로 실행 중이라 권한 거부 사례를 뺍니다.")
+        cases = [case for case in cases if case[4] not in ("PARSE_S003", "CHUNK_S003")]
+
     failures = 0
     for label, route, file_path, params, want_code, want_kind in cases:
         body = post(route, file_path, params)
@@ -321,6 +330,18 @@ def main() -> int:
     print(f"[{'PASS' if ok else 'FAIL'}] 글자 수 상한 {MAX_CHARS} 초과 보고(product_hpp 표): "
           f"보고={report.get('count')} 실제={over} 청크={len(body.get('data') or [])}")
     cases.append("max_length")
+
+    # 요청 deadline 초과. 처리기 안에서 난 시간 초과와 구분되어 COMMON_S102 로 실린다.
+    # 동기 변환 구간은 deadline 이 끊지 못하므로(알려진 한계) 비동기 LLM 호출을 기다리는 동안 넘긴다.
+    _LLM_MODE["value"] = "slow"
+    body = post("/parser", REPO_ROOT / "genon" / "preprocessor" / "sample_files" / "json" /
+                "monimo_card_sample.json", {"doc_type": "card", "request_deadline": 1})
+    _LLM_MODE["value"] = 503
+    ok = _failure_ok(body, "COMMON_S102", "timeout") and body.get("stage") == "request"
+    failures += not ok
+    print(f"[{'PASS' if ok else 'FAIL'}] 요청 deadline 초과: reason_code={body.get('reason_code')} "
+          f"error_kind={body.get('error_kind')} stage={body.get('stage')} code={body.get('code')}")
+    cases.append("deadline")
 
     # 요청 형식 오류는 라우트 함수에 닿기 전에 FastAPI 가 거부한다.
     body = client.post("/parser", json={"params": {}}).json()

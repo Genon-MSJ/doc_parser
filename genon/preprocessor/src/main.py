@@ -99,7 +99,12 @@ async def run(
         logger.info(f'Start: "{file_path}"')
         data = await _run_with_deadline(request, file_path, params)
         logger.info(f'Success: "{file_path}"')
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as e:
+        rd = _request_deadline_seconds(params)
+        if rd is None or time.time() - pt < rd:
+            # 처리기 안에서 난 시간 초과다. 요청 deadline 초과로 표시하지 않는다(#528).
+            logger.error(f'Error: "{file_path}"\n{traceback.format_exc()}\n')
+            return failure_response_from_exc(e, 'COMMON')
         logger.error(f'Error(timeout): "{file_path}"')
         return make_failure_response('request deadline exceeded', error_code=1,
                                      stage='request', error_kind='timeout',
@@ -136,7 +141,12 @@ async def parse(
         logger.info(f'[parser] Start: "{file_path}"')
         data = await _run_with_deadline(request, file_path, params)
         logger.info(f'[parser] Success: "{file_path}"')
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as e:
+        rd = _request_deadline_seconds(params)
+        if rd is None or time.time() - pt < rd:
+            # 처리기 안에서 난 시간 초과다. 요청 deadline 초과로 표시하지 않는다(#528).
+            logger.error(f'[parser] Error: "{file_path}"\n{traceback.format_exc()}\n')
+            return failure_response_from_exc(e, 'PARSE')
         logger.error(f'[parser] Error(timeout): "{file_path}"')
         return make_failure_response('request deadline exceeded', error_code=1,
                                      stage='request', error_kind='timeout',
@@ -173,7 +183,12 @@ async def chunker(
         # 앞단계(파싱) 결과 docling JSON 은 params["document"] 로 인라인 전달된다.
         data = await _run_with_deadline(request, file_path, params)
         logger.info('[chunker] Success')
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as e:
+        rd = _request_deadline_seconds(params)
+        if rd is None or time.time() - pt < rd:
+            # 처리기 안에서 난 시간 초과다. 요청 deadline 초과로 표시하지 않는다(#528).
+            logger.error(f'[chunker] Error: "{file_path}"\n{traceback.format_exc()}\n')
+            return failure_response_from_exc(e, 'CHUNK')
         logger.error('[chunker] Error(timeout)')
         return make_failure_response('request deadline exceeded', error_code=1,
                                      stage='request', error_kind='timeout',

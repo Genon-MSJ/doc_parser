@@ -204,6 +204,11 @@ async def _run(tag, processor, request, file_path, params, marker=None):
         return make_success_response(
             data=data, chunk_validation=getattr(request.state, 'chunk_validation', None))
     except asyncio.TimeoutError as e:
+        rd = _request_deadline_seconds(params)
+        if rd is None or time.time() - pt < rd:
+            # 처리기 안에서 난 시간 초과다. 요청 deadline 초과로 표시하지 않는다(#528).
+            logger.error(f'[{tag}] Error: "{file_path}"\n{traceback.format_exc()}\n')
+            return _error_response(tag, file_path, e)
         logger.error(f'[{tag}] Error(timeout): "{file_path}" (request_deadline exceeded)')
         return _error_response(tag, file_path, e, error_code=ERROR_CODE_TIMEOUT, stage='request',
                                reason_code='COMMON_S102')

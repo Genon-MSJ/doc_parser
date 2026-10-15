@@ -998,12 +998,13 @@ async def test_validation_fails_document(values, code, reason_code):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kwargs,message,reason_code", [
-    ({}, "입력이 필요합니다", "CHUNK_P002"),
-    ({"document": {"foo": 1}}, "인식할 수 없습니다", "CHUNK_P003"),
-    ({"document": {"schema_name": "DoclingDocument", "texts": "broken"}}, "복원 실패", "CHUNK_P004"),
+@pytest.mark.parametrize("file_path,kwargs,message,reason_code", [
+    ("", {}, "입력이 필요합니다", "CHUNK_P002"),
+    ("/nonexistent/parsed.json", {}, "로드 실패", "CHUNK_S003"),   # 없는 경로는 파일 오류다
+    ("", {"document": {"foo": 1}}, "인식할 수 없습니다", "CHUNK_P003"),
+    ("", {"document": {"schema_name": "DoclingDocument", "texts": "broken"}}, "복원 실패", "CHUNK_P004"),
 ])
-async def test_input_errors_are_permanent(kwargs, message, reason_code):
+async def test_input_errors_are_permanent(file_path, kwargs, message, reason_code):
     """청커 입력 오류는 다시 시도해도 같으므로 permanent 이며 사유 코드가 실린다(#528).
 
     실물 파서 산출로 만든 같은 입력은 tools/code_serving 경로로 확인했다. 여기서는 해당
@@ -1012,7 +1013,7 @@ async def test_input_errors_are_permanent(kwargs, message, reason_code):
     cf = pytest.importorskip("facade.chunking_processor")
 
     with pytest.raises(cf.GenosServiceException, match=message) as exc:
-        await cf.DocumentProcessor()(None, "", **kwargs)
+        await cf.DocumentProcessor()(None, file_path, **kwargs)
 
     assert (exc.value.error_type, exc.value.reason_code) == ("permanent", reason_code)
 

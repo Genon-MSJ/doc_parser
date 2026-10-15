@@ -460,6 +460,11 @@ def _same_value(expected: Any, actual: Any) -> bool:
         return False
 
     def norm(value: Any) -> str:
+        if isinstance(value, str) and value[:1] in ("[", "{"):
+            try:   # JSON 문자열로 직렬화된 목록·객체는 풀어서 비교한다
+                value = json.loads(value)
+            except ValueError:
+                return value
         if isinstance(value, (dict, list, tuple)):
             return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
         return str(value)

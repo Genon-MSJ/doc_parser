@@ -665,7 +665,8 @@ class ChunkerCore:
         notes["chunk_index_on_page"] += 1
         # 파서가 실어 보낸 메타 중 이 청크에 그대로 실려야 하는 값. 최종 출력과 대조한다(#528).
         expected = (notes.pop("row_expected_meta", None) if chunk.kind != "docling"
-                    else notes.get("doc_expected_meta"))
+                    else {key: value for key, value in (notes.get("doc_expected_meta") or {}).items()
+                          if key not in notes["chunk_fields"]})   # edit_chunk 값은 의도된 변경
         if notes.get("validation") is not None:
             notes["validation"].remember(
                 vector_meta, chunk, notes.get("chunk_prefix", ""), notes["chunk_idx"],
@@ -918,10 +919,11 @@ class ChunkerCore:
         # 제어 키와 transform 이 소비한 키는 의도된 제거라 대조하지 않는다.
         control_keys = {cp.BODY_FIELDS_KEY, cp.CHUNK_PREFIX_FIELDS_KEY, cp.FIRST_CHUNK_FIELDS_KEY,
                         cp.FIELD_LABELS_KEY} | set(tv.field_names()) | consumed_keys
+        # body_fields 에 오른 필드는 청크 본문으로 바뀌는 것이 계약이라 대조하지 않는다.
         doc_expected_meta = {
             key: serialize_metadata_value_for_output(value)
             for key, value in cp.strip_meta_excluded(merged_metadata).items()
-            if value is not None and key not in control_keys}
+            if value is not None and key not in control_keys and key not in _body_fields}
         # 비-PDF 입력이 변환된 경우 vector 의 file_path 를 변환 PDF 경로로 set.
         if converted_pdf_path:
             global_metadata['file_path'] = converted_pdf_path
@@ -1197,7 +1199,8 @@ class ChunkerCore:
         raw_payload = kwargs.get("document")
         if raw_payload is None:
             raw_payload = kwargs.get("docling_document")
-        if not raw_payload and file_path and file_path.lower().endswith(".json") and os.path.isfile(file_path):
+        if not raw_payload and file_path and file_path.lower().endswith(".json"):
+            # 없는 경로도 열어 보고 OSError 로 파일 오류(S003)를 매긴다(#528).
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     raw_payload = json.load(f)
