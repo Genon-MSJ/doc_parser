@@ -34,6 +34,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -448,6 +449,21 @@ class _Origin:
     flagged: bool = False
     headings: tuple = ()
     item: Optional[dict] = None     # report 모드 초기 검사의 요약 항목(최종 본문으로 채운다)
+    expected: Optional[dict] = None  # 이 청크에 그대로 실려야 하는 파서 메타(#528)
+
+
+def _same_value(expected: Any, actual: Any) -> bool:
+    """메타 값이 같은가. 정수·문자열이나 목록·JSON 문자열처럼 표기만 다른 값은 같다고 본다."""
+    if expected == actual:
+        return True
+    if actual is None:
+        return False
+
+    def norm(value: Any) -> str:
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        return str(value)
+    return norm(expected) == norm(actual)
 
 
 def _prefix_len(origin: Optional[_Origin], text: str) -> int:
@@ -578,7 +594,8 @@ class Session:
         self._flagged_initial = verdict is not None
         return verdict is not None and self.cfg.drops
 
-    def remember(self, vector_meta, chunk, prefix: str, index: int) -> None:
+    def remember(self, vector_meta, chunk, prefix: str, index: int,
+                 expected: Optional[dict] = None) -> None:
         """chunk_to_vector_meta 가 만든 vector_meta 의 출처를 기록한다.
 
         접두는 끝 공백을 빼고 기록한다. text_cleanup 의 표현 정리가 본문이 빈 청크에서
@@ -588,7 +605,7 @@ class Session:
         self._origins[id(vector_meta)] = _Origin(
             vector_meta, (prefix or "").rstrip(), chunk.kind, code_like(chunk), index, chunk.page,
             flagged=self._flagged_initial, headings=tuple(chunk.headings or ()),
-            item=self._pending_item if self._flagged_initial else None)
+            item=self._pending_item if self._flagged_initial else None, expected=expected)
 
     # --- 최종 검사 ---
     def finalize(self, vector_metas) -> list:
@@ -638,6 +655,7 @@ class Session:
 
         if not kept and items:
             raise all_rejected_error(self)
+        self._check_meta(kept)
         if self.cfg.max_chars:
             # 임베딩 모델이 받는 것은 접두를 포함한 출력 본문 전체이므로 그 길이로 잰다.
             for position, item in enumerate(kept):
@@ -650,10 +668,26 @@ class Session:
         self.log_summary(kept)
         return kept
 
+    def _check_meta(self, kept) -> None:
+        """최종 출력 청크에 파서 메타가 그대로 실렸는지 대조한다(#528).
+
+        훅(edit_output 포함)이 끝난 뒤 남은 청크만 본다. 행 청크는 청크마다, 문서 청크는
+        문서당 한 번 센다. 훅이 새로 만든 청크는 출처를 모르므로 대조하지 않는다.
+        """
+        doc_lost: set = set()
+        for item in kept:
+            origin = self._origins.get(id(item))
+            if origin is None or origin.vector_meta is not item or not origin.expected:
+                continue
+            lost = [key for key, value in origin.expected.items()
+                    if not _same_value(value, getattr(item, key, None))]
+            if origin.kind == "docling":
+                doc_lost.update(lost)
+            else:
+                self.missing_fields.update(lost)
+        self.missing_fields.update(doc_lost)
+
     # --- 기록 ---
-    def note_missing_fields(self, fields) -> None:
-        """파서가 실어 보낸 메타 중 청크에 실리지 않은 필드를 센다. 행 청크는 청크마다, 문서 청크는 문서당 1회."""
-        self.missing_fields.update(fields)
 
     def summary(self) -> Optional[dict]:
         """성공 응답에 싣는 요약. 판정에 걸린 청크도 빠진 메타 필드도 없으면 None."""

@@ -32,6 +32,14 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[4]
 MONIMO = REPO_ROOT / "genon" / "preprocessor" / "sample_files" / "monimo"
 WORK = Path(tempfile.mkdtemp(prefix="error_response_check_"))
+_CATEGORY = {"D": "data", "P": "preprocess", "S": "system"}
+
+
+def _failure_ok(body: dict, want_code: str, want_kind) -> bool:
+    """실패 응답이 기대한 사유 코드·성격·유형을 싣는가. 유형은 코드의 분류문자에서 정해진다."""
+    return (body.get("code") == 1 and body.get("reason_code") == want_code
+            and body.get("error_kind") == want_kind
+            and body.get("error_category") == _CATEGORY[want_code.partition("_")[2][:1]])
 MAX_CHARS = 1000
 
 
@@ -149,6 +157,29 @@ def _derived_inputs() -> dict:
     out["term_plus_menu"] = WORK / "monimo_term_plus_menu.xlsx"
     book.save(out["term_plus_menu"])
 
+    # 제외할 시트에 완전히 같은 열 이름이 둘 있는 통합 문서. 지정한 시트 처리를 막지 않아야 한다.
+    book = openpyxl.load_workbook(MONIMO / "monimo_term_sample.xlsx")
+    broken = book.create_sheet("메모")
+    broken.append(["비고", "비고"])
+    broken.append(["a", "b"])
+    out["term_plus_dup"] = WORK / "monimo_term_plus_dup.xlsx"
+    book.save(out["term_plus_dup"])
+
+    # 지정한 용어사전 시트에 열 이름 행만 남긴 문서(이번 배치 데이터 0건).
+    book = openpyxl.load_workbook(MONIMO / "monimo_term_sample.xlsx")
+    sheet = book["공통_용어사전"]
+    header_row = next(i for i, row in enumerate(sheet.iter_rows(values_only=True), 1)
+                      if "용어(국문)" in row)
+    sheet.delete_rows(header_row + 1, sheet.max_row)
+    out["term_header_only"] = WORK / "monimo_term_header_only.xlsx"
+    book.save(out["term_header_only"])
+
+    # 읽을 수 없는 front matter 원천. 원천 형식 오류(D005)가 아니라 파일 오류(S003)여야 한다.
+    out["locked_md"] = WORK / "locked" / "monimo_product_slf_sample.md"
+    out["locked_md"].parent.mkdir()
+    out["locked_md"].write_text(slf, encoding="utf-8")
+    out["locked_md"].chmod(0)
+
     out["locked_json"] = WORK / "locked.json"
     out["locked_json"].write_text("{}", encoding="utf-8")
     out["locked_json"].chmod(0)
@@ -185,6 +216,8 @@ def main() -> int:
          {"doc_type": "menu"}, "PARSE_D004", "permanent"),
         ("front matter 중복 키", "/parser", src["slf_dup_key"],
          {"doc_type": "product_slf"}, "PARSE_D005", "permanent"),
+        ("front matter 원천 권한 거부", "/parser", src["locked_md"],
+         {"doc_type": "product_slf"}, "PARSE_S003", "permanent"),
         ("빈 파일", "/parser", src["empty"], {"doc_type": "product_ssf"}, "PARSE_D009", "permanent"),
         ("JSON 문법 손상(faq 절반)", "/parser", src["broken_json"],
          {"doc_type": "faq"}, "PARSE_D010", "permanent"),
@@ -208,7 +241,7 @@ def main() -> int:
     for label, route, file_path, params, want_code, want_kind in cases:
         body = post(route, file_path, params)
         got = (body.get("reason_code"), body.get("error_kind"))
-        ok = got == (want_code, want_kind) and body.get("error_category")
+        ok = _failure_ok(body, want_code, want_kind)
         failures += not ok
         print(f"[{'PASS' if ok else 'FAIL'}] {label}: reason_code={got[0]} "
               f"error_category={body.get('error_category')} error_kind={got[1]}"
@@ -225,7 +258,7 @@ def main() -> int:
         _LLM_MODE["value"] = mode
         body = post("/parser", path, {"doc_type": doc_type, "toc": 1})
         got = (body.get("reason_code"), body.get("error_kind"))
-        ok = got == (want_code, want_kind) and body.get("stage") == "enrichment"
+        ok = _failure_ok(body, want_code, want_kind) and body.get("stage") == "enrichment"
         failures += not ok
         print(f"[{'PASS' if ok else 'FAIL'}] 목차 LLM {mode}({path.name}): reason_code={got[0]} error_kind={got[1]} "
               f"stage={body.get('stage')}"
@@ -241,6 +274,15 @@ def main() -> int:
     print(f"[{'PASS' if ok else 'FAIL'}] 시트 지정(용어사전+메뉴 통합 문서): elements={counts} "
           f"errMsg={str(mixed.get('errMsg'))[:80]}")
     cases.append("sheets")
+    for label, path in [("제외한 시트의 열 이름 중복은 무시", src["term_plus_dup"]),
+                        ("지정한 시트에 데이터 0건이어도 시트 없음이 아님", src["term_header_only"])]:
+        body = post("/parser", path, {"doc_type": "term"})
+        ok = body.get("code") == 0
+        failures += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] {label}: code={body.get('code')} "
+              f"elements={len((body.get('data') or {}).get('elements') or [])} "
+              f"errMsg={str(body.get('errMsg'))[:100]}")
+        cases.append(label)
 
     # 청킹 중 빠진 메타 필드 보고(missing_fields). 문서는 실패하지 않는다.
     # 실물 파서 산출에 외부 payload 처럼 예약 이름의 메타를 싣는다.
@@ -272,7 +314,9 @@ def main() -> int:
     body = post("/chunker", "", {"doc_type": "product_hpp", "document": parsed_hpp})
     report = (body.get("chunk_validation") or {}).get("max_length") or {}
     over = sum(len(v.get("text") or "") > MAX_CHARS for v in body.get("data") or [])
-    ok = body.get("code") == 0 and over > 0 and report.get("count") == over
+    ok = (body.get("code") == 0 and over > 0 and report.get("count") == over
+          and report.get("limit") == MAX_CHARS
+          and all(item["n_char"] > MAX_CHARS for item in report.get("items") or []))
     failures += not ok
     print(f"[{'PASS' if ok else 'FAIL'}] 글자 수 상한 {MAX_CHARS} 초과 보고(product_hpp 표): "
           f"보고={report.get('count')} 실제={over} 청크={len(body.get('data') or [])}")
@@ -284,6 +328,32 @@ def main() -> int:
     failures += not ok
     print(f"[{'PASS' if ok else 'FAIL'}] 요청 형식 오류(file_path 누락): reason_code={body.get('reason_code')}")
 
+    # 기본 전처리기 서비스(src/main.py)도 같은 필드를 싣는가. 파서 파사드를 배포한 형태로 띄운다.
+    import importlib.util
+    import types
+
+    module = types.ModuleType("preprocessor")
+    module.DocumentProcessor = lambda: app_main.parser_processor
+    sys.modules["preprocessor"] = module
+    spec = importlib.util.spec_from_file_location(
+        "src_main", REPO_ROOT / "genon" / "preprocessor" / "src" / "main.py")
+    src_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(src_main)
+    src_client = TestClient(src_main.app)
+    for label, route, path, params, want_code, want_kind in [
+        ("기본 전처리기 /parser 필수 열 부재", "/parser", MONIMO / "monimo_term_sample.xlsx",
+         {"doc_type": "menu"}, "PARSE_D001", "permanent"),
+        ("기본 전처리기 /run records 키 부재", "/run", MONIMO / "monimo_cs_slf_sample.json",
+         {"doc_type": "faq"}, "PARSE_D002", "permanent"),
+        ("기본 전처리기 /chunker 미지원 API", "/chunker", "", {}, "COMMON_P001", None),
+    ]:
+        body = src_client.post(route, json={"file_path": str(path), "params": params}).json()
+        ok = _failure_ok(body, want_code, want_kind)
+        failures += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] {label}: reason_code={body.get('reason_code')} "
+              f"error_category={body.get('error_category')} error_kind={body.get('error_kind')}")
+        cases.append(label)
+
     print(f"\n{len(cases) + 1 - failures}/{len(cases) + 1} 통과")
     return 1 if failures else 0
 
@@ -292,7 +362,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     finally:
-        locked = WORK / "locked.json"
-        if locked.exists():
-            locked.chmod(0o600)
+        for locked in (WORK / "locked.json", WORK / "locked" / "monimo_product_slf_sample.md"):
+            if locked.exists():
+                locked.chmod(0o600)
         shutil.rmtree(WORK, ignore_errors=True)

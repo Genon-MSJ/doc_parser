@@ -400,10 +400,11 @@ def compile_sheets(cfg: dict, *, label: str) -> list[str] | None:
     spec = cfg.get("sheets")
     if spec is None:
         return None
-    names = [str(name).strip() for name in spec]
-    if not names or not all(names):
-        raise ValueError(f"{label}: source.sheets 에는 비어 있지 않은 시트 이름을 하나 이상 적어야 합니다.")
-    return names
+    # 시트 이름은 앞뒤 공백까지 이름이므로 원문 그대로 비교한다.
+    if (not isinstance(spec, list) or not spec
+            or not all(isinstance(name, str) and name.strip() for name in spec)):
+        raise ValueError(f"{label}: source.sheets 에는 비어 있지 않은 시트 이름(문자열)을 하나 이상 적어야 합니다.")
+    return list(spec)
 
 
 def compile_row_merge(cfg: dict, *, label: str) -> dict | None:
@@ -1566,10 +1567,12 @@ class TabularCustomFieldsMapper(CustomFieldsMapperBase):
         sheets = data_dict.get("data", []) or []
         names = [str(sheet.get("sheet_name") or f"sheet_{idx + 1}") for idx, sheet in enumerate(sheets)]
         if self.sheets is not None:
-            absent = [name for name in self.sheets if name not in names]
+            # 표가 없는 시트도 있는 시트다. 워크북 시트 목록이 있으면 그것으로 본다.
+            workbook = data_dict.get("sheet_names") or names
+            absent = [name for name in self.sheets if name not in workbook]
             if absent:
                 raise CodedValueError(
-                    f"지정한 시트가 없습니다(source.sheets): {absent}; available={names}", "PARSE_D013")
+                    f"지정한 시트가 없습니다(source.sheets): {absent}; available={workbook}", "PARSE_D013")
         for sheet_idx, sheet in enumerate(sheets):
             page = sheet_idx + 1
             sheet_name = names[sheet_idx]

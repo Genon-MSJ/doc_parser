@@ -349,7 +349,15 @@ class MarkdownFrontMatterSpec:
         path = Path(file_path)
         try:
             text = path.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeError) as exc:
+        except OSError as exc:
+            if self.on_invalid == "error":
+                raise   # 파일 오류는 호출부가 성격(permanent/transient)을 나눈다(#528)
+            return self._handle(
+                self.on_invalid,
+                f"Markdown front matter 입력을 읽을 수 없습니다: {path.name} ({exc})",
+                exc,
+            )
+        except UnicodeError as exc:
             return self._handle(
                 self.on_invalid,
                 f"Markdown front matter 입력을 읽을 수 없습니다: {path.name} ({exc})",

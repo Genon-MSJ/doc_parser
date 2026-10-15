@@ -269,12 +269,15 @@ def classify_error(exc: BaseException) -> str:
     상태 번호는 `status_code` 속성과 `response.status_code`(httpx·requests 의 HTTP 오류)에서 읽는다.
     스스로 판정되지 않는 예외는 원인 예외(`__cause__`)로 판정한다. 상태 번호 없이 포장된
     연결 실패(`raise LLMApiError(...) from httpx.ConnectError`)가 permanent 로 떨어지지 않게 한다.
+    값·타입 오류(ValueError·TypeError)는 호출부가 결정적 오류로 확정한 것이므로 원인을 따라가지 않는다.
     """
     seen = 0
     while exc is not None and seen < 8:
         kind = _classify_one(exc)
         if kind is not None:
             return kind
+        if isinstance(exc, (ValueError, TypeError)):
+            return "permanent"
         exc, seen = exc.__cause__, seen + 1
     return "permanent"
 

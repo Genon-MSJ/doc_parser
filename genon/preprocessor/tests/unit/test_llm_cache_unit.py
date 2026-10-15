@@ -314,6 +314,14 @@ def _wrapped(cause: BaseException) -> Exception:
         return exc
 
 
+def _value_error_from(cause: BaseException) -> Exception:
+    """호출부가 연결 실패를 설정 오류로 확정해 다시 던진 경우."""
+    try:
+        raise ValueError("잘못된 모델 설정") from cause
+    except ValueError as exc:
+        return exc
+
+
 @pytest.mark.parametrize("make,kind", [
     (lambda: _http_status_error(503), "transient"),
     (lambda: _http_status_error(500), "transient"),
@@ -322,6 +330,7 @@ def _wrapped(cause: BaseException) -> Exception:
     (lambda: _wrapped(__import__("httpx").ConnectError("refused")), "transient"),
     (lambda: _wrapped(__import__("httpx").ReadTimeout("slow")), "timeout"),
     (lambda: _wrapped(ValueError("x")), "permanent"),
+    (lambda: _value_error_from(__import__("httpx").ConnectError("refused")), "permanent"),
 ])
 def test_classify_error_reads_http_response_and_cause(make, kind):
     """httpx 응답 상태 번호와 포장된 원인 예외로 성격을 판정한다(#528)."""

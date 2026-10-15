@@ -69,6 +69,7 @@ def test_single_mapper_still_fails_on_missing_required_column(tmp_path):
 @pytest.mark.parametrize("sheets,expected", [
     (["FAQ"], ["가입은?"]),
     (["공지"], "PARSE_D013"),
+    (["용어집 "], "PARSE_D013"),   # 시트 이름은 앞뒤 공백까지 원문 그대로 비교한다
 ])
 def test_sheets_limits_tables_and_rejects_absent_sheet(tmp_path, sheets, expected):
     """source.sheets 를 적으면 그 시트만 처리하고, 적은 시트가 없으면 원천 오류다(#528).
@@ -91,6 +92,15 @@ def test_sheets_limits_tables_and_rejects_absent_sheet(tmp_path, sheets, expecte
         assert exc.value.reason_code == expected
     else:
         assert [r["QUESTION"] for r in faq.build_fields(_TWO_SHEETS, "mixed")] == expected
+
+
+@pytest.mark.parametrize("spec", [42, True, [], [None], ["  "]])
+def test_sheets_rejects_non_name_values_at_startup(spec):
+    """source.sheets 에는 비어 있지 않은 문자열 목록만 받는다. 점검 도구도 같은 ValueError 로 잡는다(#528)."""
+    from genon.preprocessor.processing.enrichment.tabular_custom_fields import compile_sheets
+
+    with pytest.raises(ValueError):
+        compile_sheets({"sheets": spec}, label="t")
 
 
 def test_two_mappers_cover_two_schemas(tmp_path):

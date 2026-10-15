@@ -16,7 +16,7 @@ custom_fields 설정(yaml)은 **parser 만 읽습니다.** chunker 는 파서가
 | `code` | `0` 성공 / `1` 실패 |
 | `errMsg` · `error_msg` | `[엔드포인트] 예외이름: 메시지`. 두 필드에 같은 값이 들어갑니다 |
 | `error_code` | 아래 설명 참조 |
-| `error_type` | 예외 클래스명 |
+| `error_type` | 예외 클래스명. 코드서빙 서비스(루트 `main.py`)만 싣습니다(`tag`·`file_path`·`traceback` 도 같습니다) |
 | `tag` | 실패한 엔드포인트 (`parser` / `parser_upload` / `chunker`) |
 | `file_path` | 대상 파일. 파서 결과를 본문에 담아 호출하면 빈 값 |
 | `stage` | `custom_fields` / `metadata` / `doc_summary` / `image_description` / `table_description` / `table_text_description` / `doc_type_stamp` / `enrichment` / `request` / `chunk_validation`. **값이 있을 때만 실립니다** |
@@ -40,7 +40,8 @@ raw 예외**(마크다운 머리말 오류 등)뿐입니다.
 
 아래 사유 코드표의 성격 열이 `error_kind` 로 실립니다. 원천데이터(D)·전처리(P) 오류는 다시 시도해도
 결과가 같으므로 `permanent` 이고, 시스템(S) 오류는 코드 번호대로 나뉩니다. 사유 코드가 없는
-미분류 오류(`*_P999`)는 `error_kind` 가 실리지 않습니다.
+미분류 오류(`*_P999`)의 `error_kind` 는 감싸는 자리가 정합니다. 매핑 단계처럼 감싸는 자리가 결정적 오류로
+보는 곳에서는 `permanent` 가 실리고, 진입점의 일반 예외 경로에서는 실리지 않습니다.
 
 ## 사유 코드
 
@@ -76,7 +77,7 @@ raw 예외**(마크다운 머리말 오류 등)뿐입니다.
 | `PARSE_D011` | permanent | 구분자로 나뉜 레코드가 없음 |
 | `PARSE_D012` | permanent | `markdown.sections` 적용 후 본문 없음 |
 | `PARSE_D013` | permanent | `source.sheets` 로 지정한 시트가 워크북에 없음 |
-| `PARSE_P001` | permanent | LLM 입력 길이 사전 검사 초과 |
+| `PARSE_P001` | permanent | LLM 입력 길이 사전 검사 초과(목차·메타데이터 추출의 `precheck`). 표 설명의 길이 초과(`overflow_policy: error`)는 경고 후 진행합니다 |
 | `PARSE_P002` | permanent | 등록되지 않은 doc_type(`defaults.unknown_doc_type: fail`) |
 | `PARSE_P003` | permanent | 같은 doc_type 에 설정이 여러 개 |
 | `PARSE_P004` | permanent | `llm_fields` 설정 오류 |
@@ -85,7 +86,7 @@ raw 예외**(마크다운 머리말 오류 등)뿐입니다.
 | `PARSE_S001` | permanent | LLM 인증·권한·요청 거부(429 를 제외한 4xx) |
 | `PARSE_S002` | permanent | 실행 환경 구성 누락(LibreOffice, unstructured) |
 | `PARSE_S003` | permanent | 원천 파일 없음·권한 거부 |
-| `PARSE_S101` | transient | LLM 일시 장애(429, 5xx, 연결 실패) |
+| `PARSE_S101` | transient | LLM 일시 장애(429, 5xx, 연결 실패). 호출자가 나중에 다시 시도할 만하다는 뜻이며, 전처리기의 자체 재호출 대상(429·502·503·504)과는 범위가 다릅니다 |
 | `PARSE_S102` | timeout | LLM 호출 시간 초과 |
 | `PARSE_S103` | transient | 그 밖의 파일 입출력 실패 |
 | `PARSE_S201` | permanent | LLM 응답 형식 이상 |
@@ -109,9 +110,10 @@ raw 예외**(마크다운 머리말 오류 등)뿐입니다.
 
 ### 실패 정책
 
-`error_policy: lenient`(기본)에서 문서형 extractor(`llm`/`python`/`html_select`)의 런타임
-예외는 WARNING 후 성공 응답. `strict` 에서만 `code: 1`.
-레코드형(`rows`/`records`/`sections`)은 정책과 무관하게 실패합니다.
+문서형 extractor(`llm`/`python`/`html_select`)의 LLM 호출 실패·응답 해석 실패는 `error_policy` 와 무관하게
+WARNING 을 남기고 해당 필드를 null 로 둔 채 성공 응답합니다. 문서 요약·표 설명 단계도 같습니다.
+LLM 오류를 실패 응답(`code: 1`, `PARSE_S0xx`·`S1xx`·`S2xx`)으로 받는 경로는 docling 기본 enrichment(목차·메타데이터
+추출)입니다. 레코드형(`rows`/`records`/`sections`)의 매핑 오류는 정책과 무관하게 실패합니다.
 
 ### 응답 예시
 
@@ -215,7 +217,7 @@ raw 예외**(마크다운 머리말 오류 등)뿐입니다.
 **구분 단서**
 
 - 위 표의 원인별 사유 코드는 [사유 코드](#사유-코드) 표에 있습니다. 매핑 오류(`ValueError`)는 `stage: custom_fields` 를 싣습니다.
-- 일시적 실패는 전처리기가 1회만 자체 재호출합니다(`Retry-After` 존중, 최대 10초).
+- 일시적 실패 중 429·502·503·504·연결 오류는 전처리기가 1회만 자체 재호출합니다(`Retry-After` 존중, 최대 10초). 500 은 자체 재호출하지 않지만 응답의 `error_kind` 는 `transient` 입니다.
 - 표 설명 프롬프트가 `model_context_tokens` 를 넘는 경우도 `ValueError` 로 나지만, 기본 설정은 내용을 나눠 여러 번 호출하므로 발생하지 않습니다.
 
 ---

@@ -1018,25 +1018,40 @@ async def test_input_errors_are_permanent(kwargs, message, reason_code):
 
 
 @pytest.mark.asyncio
-async def test_overwritten_row_meta_is_reported():
-    """파서가 실어 보낸 행 메타가 청킹 중 예약 값으로 덮어써지면 검증 요약에 남는다(#528).
+@pytest.mark.parametrize("hook,expected", [
+    (None, {"i_page": 1}),          # 외부 payload 의 예약 키가 청킹 중 덮어써짐
+    ("blank_biz_id", {"BIZ_ID": 1, "i_page": 1}),   # edit_output 이 최종 출력에서 값을 지움
+    ("drop_first", None),           # 버려진 청크는 세지 않는다
+])
+async def test_lost_row_meta_is_reported_on_final_output(hook, expected):
+    """파서가 실어 보낸 행 메타가 최종 출력 청크에 그대로 실리지 않으면 검증 요약에 남는다(#528).
 
-    값은 실물 sample_files/monimo/monimo_faq_json_sample.json 의 첫 레코드다. i_page 는
-    외부 payload 가 예약 이름을 실어 온 경우를 흉내 낸 것이다. 문서는 실패하지 않는다.
+    값은 실물 sample_files/monimo/monimo_faq_json_sample.json 의 첫 두 레코드다. 첫 행의
+    i_page 는 외부 payload 가 예약 이름을 실어 온 경우를 흉내 낸 것이다. 문서는 실패하지 않는다.
     """
     tb = pytest.importorskip("processing.core.toolbox")
     cf = pytest.importorskip("facade.chunking_processor")
-    elements = [{
-        "category": "tabular_row", "content": "설정한 홈 화면을 변경하고 싶어요.", "page": 1, "id": 0,
-        "metadata": {"BIZ_ID": "ca01_1", "QUESTION": "설정한 홈 화면을 변경하고 싶어요.", "i_page": 99},
-    }]
+
+    class _P(cf.DocumentProcessor):
+        def edit_output(self, vector_metas, **kwargs):
+            if hook == "blank_biz_id":
+                vector_metas[0].BIZ_ID = None
+            if hook == "drop_first":
+                return vector_metas[1:]
+            return vector_metas
+
+    elements = [
+        {"category": "tabular_row", "content": "설정한 홈 화면을 변경하고 싶어요.", "page": 1, "id": 0,
+         "metadata": {"BIZ_ID": "ca01_1", "QUESTION": "설정한 홈 화면을 변경하고 싶어요.", "i_page": 99}},
+        {"category": "tabular_row", "content": "SFC 삼성카드는 어떻게 신청하나요?", "page": 1, "id": 1,
+         "metadata": {"BIZ_ID": "ca01_2", "QUESTION": "SFC 삼성카드는 어떻게 신청하나요?"}},
+    ]
     request = tb.mock_request()
 
-    vectors = await _validating(cf.DocumentProcessor(), action="report")(
-        request, "", document={"elements": elements})
+    await _validating(_P(), action="report")(request, "", document={"elements": elements})
 
-    assert [v.BIZ_ID for v in vectors] == ["ca01_1"]
-    assert request.state.chunk_validation["missing_fields"] == {"i_page": 1}
+    summary = request.state.chunk_validation or {}
+    assert summary.get("missing_fields") == expected
 
 
 @pytest.mark.asyncio

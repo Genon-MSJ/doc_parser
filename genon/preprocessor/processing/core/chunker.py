@@ -546,7 +546,6 @@ class ChunkerCore:
             self, job, notes["marker_vectors"],
             display=lambda text: self.clean_text(job, gr.apply_to_text(
                 text, notes["sensitive_infos"], notes["masking"])[0]))
-        self._note_missing_fields(job, notes.get("lost_doc_fields") or ())
         for chunk_idx, chunk in enumerate(chunks):
             if chunk.kind == "marker":
                 continue
@@ -664,17 +663,14 @@ class ChunkerCore:
         vector_meta = (self._record_vector_meta(job, chunk, text) if chunk.kind != "docling"
                        else self._docling_vector_meta(job, chunk, text))
         notes["chunk_index_on_page"] += 1
+        # 파서가 실어 보낸 메타 중 이 청크에 그대로 실려야 하는 값. 최종 출력과 대조한다(#528).
+        expected = (notes.pop("row_expected_meta", None) if chunk.kind != "docling"
+                    else notes.get("doc_expected_meta"))
         if notes.get("validation") is not None:
             notes["validation"].remember(
-                vector_meta, chunk, notes.get("chunk_prefix", ""), notes["chunk_idx"])
+                vector_meta, chunk, notes.get("chunk_prefix", ""), notes["chunk_idx"],
+                expected=expected)
         return vector_meta
-
-    @staticmethod
-    def _note_missing_fields(job, fields) -> None:
-        """청킹 중 빠진 메타 필드를 검증 요약에 남긴다. 검증이 꺼져 있으면 남기지 않는다."""
-        validation = job.notes.get("validation")
-        if fields and validation is not None:
-            validation.note_missing_fields(fields)
 
     def _record_vector_meta(self, job, chunk, text: str):
         """행·텍스트 청크 1건을 vector_meta 로 만든다.
@@ -714,11 +710,11 @@ class ChunkerCore:
             **notes["global_metadata"],
             **notes["chunk_fields"],  # edit_chunk 가 info["fields"] 로 넘긴 청크별 값
         }
-        # 뒤에 오는 예약 값이 파서가 실어 보낸 목표 필드를 덮어쓰면 보고한다(#528).
-        # edit_chunk 가 넘긴 값은 고객이 의도한 것이므로 세지 않는다.
-        self._note_missing_fields(job, [
-            key for key, value in record_meta.items()
-            if value is not None and merged[key] != value and key not in notes["chunk_fields"]])
+        # 행 메타(목표 필드)는 청크에 그대로 실려야 한다. edit_chunk 가 넘긴 값은 고객이 의도한
+        # 변경이므로 대조하지 않는다(#528).
+        notes["row_expected_meta"] = {
+            key: value for key, value in record_meta.items()
+            if value is not None and key not in notes["chunk_fields"]}
         try:
             return self.VECTOR_META.model_validate(merged)
         except Exception as exc:
@@ -918,14 +914,14 @@ class ChunkerCore:
         )
         global_metadata.update(typed_values)  # 설정 기반 typed 필드 (created_date 등)
         global_metadata.update(passthrough_metadata)
-        # 문서 메타 중 예약 이름과 겹쳐 passthrough 에서 빠졌고 청크에 다른 값으로 실리는 필드(#528).
-        # 제어 키와 transform 이 소비한 키는 의도된 제거라 세지 않는다.
+        # 문서 메타는 모든 청크에 같은 값으로 실려야 한다. 최종 출력과 대조한다(#528).
+        # 제어 키와 transform 이 소비한 키는 의도된 제거라 대조하지 않는다.
         control_keys = {cp.BODY_FIELDS_KEY, cp.CHUNK_PREFIX_FIELDS_KEY, cp.FIRST_CHUNK_FIELDS_KEY,
                         cp.FIELD_LABELS_KEY} | set(tv.field_names()) | consumed_keys
-        lost_doc_fields = sorted(
-            key for key, value in cp.strip_meta_excluded(merged_metadata).items()
-            if value is not None and key in reserved_keys and key not in control_keys
-            and global_metadata.get(key) != serialize_metadata_value_for_output(value))
+        doc_expected_meta = {
+            key: serialize_metadata_value_for_output(value)
+            for key, value in cp.strip_meta_excluded(merged_metadata).items()
+            if value is not None and key not in control_keys}
         # 비-PDF 입력이 변환된 경우 vector 의 file_path 를 변환 PDF 경로로 set.
         if converted_pdf_path:
             global_metadata['file_path'] = converted_pdf_path
@@ -945,7 +941,7 @@ class ChunkerCore:
             first_prefix_pending=bool(_first_prefix_text),
             appendix_list=appendix_list,
             global_metadata=global_metadata,
-            lost_doc_fields=lost_doc_fields,
+            doc_expected_meta=doc_expected_meta,
             # 문서형은 표 변형을 table_variants 기록부로 만든다. 반복문이 형식을 가리지 않게
             # 같은 키를 두되 이 경로에서는 쓰이지 않는다.
             variant_options={},

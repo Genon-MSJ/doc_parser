@@ -173,9 +173,18 @@ def _llm_reason(exc: Exception, error_type: str):
         return "PARSE_S102"
     if error_type == "transient":
         return "PARSE_S101"
-    if isinstance(getattr(exc, "status_code", None), int):
-        return "PARSE_S001"       # 4xx: 인증·권한·요청 거부
-    if any("LLMResponseError" in type(e).__name__ for e in (exc, exc.__cause__)):
+    # classify_error 와 같은 범위(속성·response·원인 체인)를 본다.
+    chain, current = [], exc
+    while current is not None and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__
+    for item in chain:
+        status = getattr(item, "status_code", None)
+        if not isinstance(status, int):
+            status = getattr(getattr(item, "response", None), "status_code", None)
+        if isinstance(status, int):
+            return "PARSE_S001"   # 4xx: 인증·권한·요청 거부
+    if any("LLMResponseError" in type(item).__name__ for item in chain):
         return "PARSE_S201"       # 응답 형식 이상(송신기가 LLMApiError 로 포장한 경우 포함)
     return None                   # 진입점이 미분류 코드를 싣는다
 
@@ -892,7 +901,8 @@ class ParserCore:
         finally:
             shutil.rmtree(tmp_path, ignore_errors=True)
 
-    def _parse_tabular(self, file_path: str, sheets_with_merges: dict | None = None) -> dict:
+    def _parse_tabular(self, file_path: str, sheets_with_merges: dict | None = None,
+                       only_sheets: set | None = None) -> dict:
         """xlsx/csv → {"data":[{"sheet_name","title","data_rows":[{col:val}]}]} (이슈 #288).
 
         표 감지(멀티헤더 자동 + 1시트 복수표)는 xlsx_processor.load_tables 에 위임한다.
@@ -907,6 +917,7 @@ class ParserCore:
             header_row=self._xlsx_cfg["header_row"],
             multi_table=self._xlsx_cfg["multi_table"],
             sheets_with_merges=sheets_with_merges,
+            only_sheets=only_sheets,
         )
 
     def _parse_other(self, file_path: str, **kwargs) -> list:
@@ -932,6 +943,13 @@ class ParserCore:
         if fm_spec is not None:
             try:
                 parsed = fm_spec.parse(file_path)
+            except OSError as exc:
+                # 파일 오류는 원천 형식 오류가 아니다. 성격을 errno 로 나눈다(#528).
+                code, kind = os_error_reason(exc, "PARSE")
+                raise GenosServiceException(
+                    "1", f"Markdown 입력을 읽을 수 없습니다: {Path(file_path).name} ({exc})",
+                    stage="custom_fields", error_type=kind, reason_code=code,
+                ) from exc
             except ValueError as exc:
                 raise GenosServiceException(
                     "1", str(exc), stage="custom_fields", error_type="permanent",
@@ -1349,7 +1367,23 @@ class ParserCore:
         섞여 오는 원천 대응이다. 어느 매퍼도 안 맡은 표가 있으면 경고로 드러낸다.
         조용히 사라지면 "몇 건이 왜 없지"를 나중에 데이터에서 발견하게 된다.
         """
-        data_dict = self._parse_tabular(file_path, sheets_with_merges)
+        # 모든 매퍼가 source.sheets 를 적었으면 그 시트만 표로 바꾼다. 나머지 시트의 결함이
+        # 지정한 시트의 처리를 막지 않게 한다(#528). 하나라도 생략했으면 모든 시트를 본다.
+        selections = [getattr(mapper, "sheets", None) for mapper in mappers]
+        only_sheets = ({name for names in selections for name in names}
+                       if selections and all(s is not None for s in selections) else None)
+        try:
+            data_dict = self._parse_tabular(file_path, sheets_with_merges, only_sheets)
+        except OSError as exc:
+            code, kind = os_error_reason(exc, "PARSE")
+            raise GenosServiceException(
+                "1", f"원천을 읽을 수 없습니다: {os.path.basename(file_path)} ({exc})",
+                error_type=kind, reason_code=code,
+            ) from exc
+        except ValueError as exc:
+            raise GenosServiceException(
+                "1", str(exc), stage="custom_fields", error_type="permanent",
+                reason_code=reason_of(exc)) from exc
         multi = len(mappers) > 1
         results: list = []
         # 표 단위로 맡았는지 본다. 건수 총합만 세면 매퍼 A 가 시트1을 맡은 순간 시트2가
