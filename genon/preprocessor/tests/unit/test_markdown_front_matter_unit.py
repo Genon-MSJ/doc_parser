@@ -386,7 +386,9 @@ def test_product_markdown_parser_to_chunk_round_trip():
     """출고 설정/샘플로 front matter 제거와 Docling JSON metadata 왕복을 검증."""
     rows = _product_slf_round_trip()
     forbidden = ("source_file:", "source_pages:", "created_at:", "conversion_note:")
-    assert len(rows) == 7
+    # 사이트 설정의 markdown.sections 가 안내 섹션 3개(핵심 키워드·문서 개요·내용 색인)를
+    # 지워 원문 4쪽만 남는다(#526).
+    assert len(rows) == 4
     assert all(not any(token in row["text"] for token in forbidden) for row in rows)
     # front matter 값 중 metadata 로 broadcast 되는 것은 설정이 `fields.<목표>.alias` 로
     # 선언한 것뿐이다. 사이트 운영 설정(커밋 263f53ea)은 created_at → created_date 와

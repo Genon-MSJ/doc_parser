@@ -25,6 +25,8 @@ conversion_note 7줄을 갖는데, 그대로 두면 그 7줄만으로 이루어�
 `markdown:` 블록의 해석(`resolve_markdown_cfg`)과 하위 블록 빌더를 이 모듈이 소유한다 —
 `front_matter` 외에 `text_fence`(펜스 본문을 단락으로 복원, 변환 로직은
 `processing.converters.md_text_fence`)도 같은 자리에서 컴파일한다.
+`sections`(청크 본문에 넣을 섹션 선택, 변환 로직은 `processing.converters.md_sections`)도
+같다.
 """
 from __future__ import annotations
 
@@ -36,6 +38,7 @@ from typing import Any
 
 import yaml
 
+from genon.preprocessor.processing.converters.md_sections import MarkdownSectionsSpec
 from genon.preprocessor.processing.converters.md_text_fence import MarkdownTextFenceSpec
 
 from .custom_fields_enricher import (
@@ -593,6 +596,27 @@ def build_markdown_text_fence_specs(configs: list[dict]) -> list[MarkdownTextFen
         specs.append(
             MarkdownTextFenceSpec.from_config(
                 fence_cfg, normalize_doc_types(config.get("doc_type"))
+            )
+        )
+    return specs
+
+
+def build_markdown_sections_specs(configs: list[dict]) -> list[MarkdownSectionsSpec]:
+    """문서 단위 custom_fields 설정들을 sections spec 으로 컴파일한다(기동 시 1회).
+
+    ``sections: false`` 또는 생략은 비활성화다. 값 형식 오류는 기동 실패로 드러낸다.
+    """
+    specs = []
+    for config in configs or []:
+        markdown_cfg = resolve_markdown_cfg(config)
+        if markdown_cfg is None:
+            continue
+        sections_cfg = markdown_cfg.get("sections")
+        if sections_cfg is None or sections_cfg is False:
+            continue
+        specs.append(
+            MarkdownSectionsSpec.from_config(
+                sections_cfg, normalize_doc_types(config.get("doc_type"))
             )
         )
     return specs

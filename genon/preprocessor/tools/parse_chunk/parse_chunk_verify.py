@@ -106,6 +106,9 @@ CASES = [
     ("product_slf",   MONIMO / "monimo_product_slf_fields_sample.md",
      "코드값·비표준 날짜·브랜드 분리 front matter"),
     ("product_ssf",   MONIMO / "monimo_product_ssf_sample.md",         "llm + markdown front matter"),
+    # 캡처한 실물 구조(안내 섹션 → `## 원문 전사` → `## 원문 N쪽`)를 본뜬 합성 샘플(#526).
+    ("product_slf",   MONIMO / "monimo_product_slf_sections_sample.md", "markdown.sections(목차 페이지 포함)"),
+    ("product_ssf",   MONIMO / "monimo_product_ssf_sections_sample.md", "markdown.sections"),
     # 본문 표를 파이프 표가 아니라 HTML <table> 로 쓴 마크다운. md 백엔드가 HTML 블록을
     # HTML 백엔드로 왕복시켜 TableItem 으로 만드는 경로를 고정한다.
     ("product_ssf",   MONIMO / "monimo_product_ssf_html_table_sample.md",
@@ -133,12 +136,13 @@ def check_front_matter(chunks: list) -> list[str]:
 
     front_matter 블록은 fields 에 매핑한 키(created_at 등)만 metadata 로 올리고 front matter
     전체는 청크 텍스트에서 뺀다. front matter 만으로
-    이루어진 청크가 사라져 8청크 → 7청크가 된다. LLM 이 죽어도 이 단정은 유지된다.
+    이루어진 청크가 사라져 8청크 → 7청크가 된다. 여기에 markdown.sections 가 안내 섹션
+    3개를 지워 4청크가 된다(#526). LLM 이 죽어도 이 단정은 유지된다.
     """
     problems = []
     c = chunks[0]
-    if len(chunks) != 7:
-        problems.append(f"청크 7건 기대, 실제 {len(chunks)}건(front matter 청크 제거 실패)")
+    if len(chunks) != 4:
+        problems.append(f"청크 4건 기대, 실제 {len(chunks)}건(front matter·안내 섹션 제거 실패)")
     if c.get("created_date") != 20260112:
         problems.append(f"created_at → date_int transform 실패: {c.get('created_date')!r}")
     leaked = [i for i, x in enumerate(chunks)
@@ -716,6 +720,30 @@ def check_valid_period(chunks: list) -> list[str]:
     return [] if found == expected else [f"VALID_FROM/VALID_TO 가 {expected} 가 아닙니다: {sorted(map(str, found))}"]
 
 
+def check_sections_selected(product: str, first_page: str):
+    """product_slf/ssf — markdown.sections 로 원문만 남았는가(#526).
+
+    안내 섹션·`원문 전사` 표식·원본 목차 페이지가 본문에 없고, 모든 청크 HEADER 가 상품명
+    H1 에서 시작하며, 첫 청크가 기대한 원문 페이지인지 본다. 출시일 1회 표기는
+    check_product_attrs_once 가 본다.
+    """
+    def _check(chunks: list) -> list[str]:
+        problems = []
+        texts = [str(c.get("text") or "") for c in chunks]
+        for marker in ("문서 개요", "핵심 키워드", "내용 색인", "원문 전사", "■ 주요보험 용어의 설명"):
+            hits = [i for i, t in enumerate(texts) if marker in t]
+            if hits:
+                problems.append(f"'{marker}' 가 청크 {hits} 에 남았습니다")
+        headers = [line for t in texts for line in t.splitlines() if line.startswith("HEADER:")]
+        stray = [h for h in headers if not h.startswith(f"HEADER: {product} > ")]
+        if stray:
+            problems.append(f"상품명으로 시작하지 않는 HEADER: {stray}")
+        if not headers or headers[0] != f"HEADER: {product} > {first_page}":
+            problems.append(f"첫 HEADER 가 '{product} > {first_page}' 가 아닙니다: {headers[:1]}")
+        return problems
+    return _check
+
+
 def check_term_duplicate_rows(chunks: list) -> list[str]:
     """완전 중복 행(SLF_0001 재전송)은 한 번만, 최종수정일만 다른 대조군(HPP_0001)은 둘 다 남는다(#412)."""
     found = sorted((str(c.get("BIZ_ID")), str(c.get("SRC_LAST_MOD_DT"))) for c in chunks)
@@ -729,6 +757,10 @@ EXTRA_CHECKS = {
     ("product_slf", "monimo_product_slf_sample.md"):
         lambda chunks: check_front_matter(chunks) + check_product_attrs_once(chunks),
     ("product_ssf", "monimo_product_ssf_sample.md"): check_product_attrs_once,
+    ("product_slf", "monimo_product_slf_sections_sample.md"):
+        check_sections_selected("無비추미암보험", "원문 2쪽 - 상품요약서"),
+    ("product_ssf", "monimo_product_ssf_sections_sample.md"):
+        check_sections_selected("주택화재보험", "원문 1쪽 - 주택화재보험 상품요약서"),
     ("product_ssf", "monimo_product_ssf_html_table_sample.md"): check_md_html_table,
     ("product_hpp", "monimo_product_hpp_sample.json"): check_annual_fee_once,
     ("card", "card01.flat.html"): check_card_annual_fee,
