@@ -222,7 +222,7 @@ enrichment:
         retrieval_context_max_chars: 350
         key_fact_limit: 3
         key_fact_max_chars: 160
-        search_terms_limit: 8
+        search_terms_limit: 0      # 청크에 싣지 않으면(include_search_terms: false) 0 으로 두어 출력 예산을 아낀다
         include_search_terms: false
         repeat_context_on_split: true
 
