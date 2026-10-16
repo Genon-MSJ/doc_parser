@@ -130,6 +130,7 @@ def _full_chunk(doc, heading, lines=11):
     "short_pages_run",      # 짧은 쪽 20개 연속 → 정상 쪽 (예전: 한 청크로 쌓여 한도의 몇 배)
     "short_before_full",    # 문서 첫머리 짧은 쪽 → 꽉 찬 청크 (예전: 붙인 만큼 한도 초과)
     "short_after_full",     # 꽉 찬 청크 → 문서 끝 짧은 쪽
+    "short_before_long_lines",  # 옮기지 않는 긴 줄은 원문 줄 그대로 남는다(예전: 기준 단위로 줄바꿈)
 ])
 def test_short_merge_keeps_size_limit_without_short_chunks(layout):
     """짧은 청크를 남기지 않으면서 어떤 청크도 한도를 넘지 않고, 본문은 순서대로 모두 남는다."""
@@ -139,6 +140,8 @@ def test_short_merge_keeps_size_limit_without_short_chunks(layout):
         "short_pages_run": [short(i) for i in range(20)] + [_full_chunk(doc, "본문", lines=5)],
         "short_before_full": [short(0), _full_chunk(doc, "본문")],
         "short_after_full": [_full_chunk(doc, "본문"), short(0)],
+        "short_before_long_lines": [short(0), _text_chunk(
+            doc, "\n".join([_LINE] * 3 + [_LINE + " " + _LINE * 3] * 2), "본문")],
     }[layout]
     chunker = SmartChunkerBase.model_construct(
         include_chunk_header=True, max_tokens=400, short_chunk_size=100,
@@ -193,6 +196,24 @@ def test_merge_never_creates_a_chunk_the_validation_drops():
 
     assert not any(_DROP(c) for c in result)
     assert "\n".join(c.text for c in result).count("해당 특약은") == 10
+
+
+def test_next_section_title_stays_with_its_section():
+    """짧은 각주 뒤의 다음 섹션 제목이 각주 묶음 끝에 남아 자기 섹션과 떨어졌다(실물: hwpx 표 각주 → '5. 종류별 이혼')."""
+    from docling_core.types.doc.document import TableData
+    doc = DoclingDocument(name="sample")
+    note = _text_chunk(doc, "1) 다문화 이혼 : 남녀 어느 한쪽이 외국인 또는 귀화자인 경우", "4. 지속기간")
+    title = DocChunk(text="5. 종류별 이혼", meta=DocMeta(
+        doc_items=[doc.add_title(text="5. 종류별 이혼")], headings=["5. 종류별 이혼"]))
+    body = DocChunk(text="\n".join([_LINE] * 10), meta=DocMeta(
+        doc_items=[doc.add_text(label=DocItemLabel.TEXT, text=_LINE),
+                   doc.add_table(data=TableData(num_rows=1, num_cols=1))], headings=["5. 종류별 이혼"]))
+    chunker = SmartChunkerBase.model_construct(
+        include_chunk_header=True, max_tokens=400, short_chunk_size=100,
+        chunk_prefix_text="", CHUNK_PATH_MAX_LEAVES=5)
+    result = chunker._merge_heading_only_chunks([note, title, body])
+
+    assert [c.text for c in result] == [note.text, f"{title.text}\n{body.text}"]
 
 
 def test_trailing_short_skips_dropped_chunk_to_merge_backward():
