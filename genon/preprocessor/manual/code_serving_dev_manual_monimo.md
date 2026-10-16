@@ -1556,8 +1556,9 @@ facade의 `GenosSmartChunker` ClassVar는 청크 표기 방식을 정합니다.
 { "code": 0, "errMsg": "success", "data": { } }
 ```
 
-- 애플리케이션이 처리한 성공·실패는 HTTP 200으로 반환되며 `code: 0`이 성공입니다. 요청 형식 검증·네트워크·게이트웨이 오류는 비-200일 수 있으므로 HTTP 상태와 JSON 본문을 모두 검사합니다.
+- 애플리케이션이 처리한 성공·실패는 요청 형식 오류(`COMMON_P002`)를 포함해 HTTP 200으로 반환되며 `code: 0`이 성공입니다. 네트워크·게이트웨이 오류는 비-200일 수 있으므로 HTTP 상태와 JSON 본문을 모두 검사합니다.
 - 공통 오류 응답의 `error_type`은 예외 클래스명입니다. `error_code`, `traceback`도 포함됩니다.
+- 실패 응답에는 사유 코드 `reason_code`(예: `PARSE_D001`)와 유형 `error_category`(`data` / `preprocess` / `system`)가 항상 포함됩니다. 원인 구분은 `error_code`가 아니라 `reason_code`로 합니다. 호출 측의 판정·재시도 기준은 [monimo_caller_error_handling.md](monimo_caller_error_handling.md)에 있습니다.
 - `stage`는 실패 단계, `error_kind`는 `transient` / `permanent` / `timeout`과 같은 실패 성격이며, 정보가 있을 때만 포함됩니다. 예외 생성자의 `error_type` 인자는 응답에서 `error_kind`로 나갑니다.
 - core가 넣는 `stage` 값은 `custom_fields` · `doc_summary` · `image_description` · `metadata` · `doc_type_stamp`(보강 단계의 상위 오류 처리로 전달된 예외, `error_policy: strict`일 때)와 `request`(요청 제한 시간 초과)입니다. 행 메타데이터의 청킹 중 타입 검증 실패도 정책과 무관하게 `stage: custom_fields`로 반환됩니다. 훅에서 직접 지정한 값은 그대로 나갑니다.
 - facade가 `GenosServiceException`으로 던진 오류는 `error_code`가 보존됩니다. 그 외 예외는
