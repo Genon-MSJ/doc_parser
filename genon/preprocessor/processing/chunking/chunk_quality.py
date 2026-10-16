@@ -41,6 +41,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from genon.preprocessor.processing.chunking.table_splitter import ROW_LINES_LABEL
@@ -416,6 +417,18 @@ def judge(text: Optional[str], *, kind: str = "docling", code_like: bool = False
         "broken_max_share": cfg.broken_max_share,
     }
     return Verdict(hits[0], tuple(hits[1:]), measures, limits)
+
+
+def rejects_doc_chunk(cfg: Config):
+    """청커 단계 DocChunk 가 초기 검사(Session.check_chunk)에서 버려질지 판정하는 함수.
+
+    짧은 청크 병합이 버려질 청크를 건너뛰고, 합친 결과가 버려질 청크가 되는 병합을 피하는 데
+    쓴다. 초기 검사와 같은 입력(청크 본문, 코드·수식 라벨)으로 판정해야 결과가 어긋나지 않는다.
+    """
+    def _rejects(doc_chunk) -> bool:
+        return judge(doc_chunk.text, code_like=code_like(SimpleNamespace(source=doc_chunk)),
+                     cfg=cfg) is not None
+    return _rejects
 
 
 # ---------------------------------------------------------------------------

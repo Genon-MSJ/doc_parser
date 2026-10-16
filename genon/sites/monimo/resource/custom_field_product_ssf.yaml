@@ -78,6 +78,9 @@ body:
   once: [created_date]
   labels:
     created_date: 출시일
+  # 본문(HEADER 제외)이 200자 미만인 청크를 다음 청크에 붙인다. 제목만 있거나 본문이 1~2줄인
+  # 섹션은 HEADER 경로가 청크의 큰 몫을 차지해 제목 검색어로만 상위에 오르고 답변 근거는 주지 못한다.
+  merge_short: 200
 # llm:
 # - out: [PRODUCT_NM, PRODUCT_ATTRS]
 #   parser:

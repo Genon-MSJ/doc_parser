@@ -545,6 +545,8 @@ class CustomFieldsEnricher(BaseEnricher):
         self._first_chunk_fields = cp.parse_field_name_list(cfg.get(cp.FIRST_CHUNK_FIELDS_KEY))
         # 위 두 규칙으로 얹힌 값 앞에 붙일 사람이 읽는 항목명. 이름이 있는 필드만 붙는다.
         self._field_labels = cp.parse_field_labels(cfg.get(cp.FIELD_LABELS_KEY))
+        # 짧은 청크 병합 기준(body.merge_short). 같은 성격의 규칙이라 문서 metadata 로 청커에 넘긴다.
+        self._short_chunk_size = cfg.get(cp.SHORT_CHUNK_SIZE_KEY)
         resolved_key = api_key or cfg.get("api_key", "")
         resolved_headers_cfg = headers if headers is not None else cfg.get("headers")
         self._headers = resolve_headers({"headers": resolved_headers_cfg}, resolved_key)
@@ -904,6 +906,9 @@ class CustomFieldsEnricher(BaseEnricher):
                 **normalized, cp.FIRST_CHUNK_FIELDS_KEY: list(self._first_chunk_fields)}
         if self._field_labels:
             normalized = {**normalized, cp.FIELD_LABELS_KEY: dict(self._field_labels)}
+        short_chunk_size = getattr(self, "_short_chunk_size", None)
+        if short_chunk_size is not None:
+            normalized = {**normalized, cp.SHORT_CHUNK_SIZE_KEY: short_chunk_size}
         # 같은 성격의 규칙 — 값은 여기까지 다 만들어졌고, 청커가 청크 메타를 조립할 때만 뺀다.
         normalized = cp.attach_meta_exclude(normalized, self._meta_exclude)
         return normalized

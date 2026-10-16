@@ -137,12 +137,14 @@ def check_front_matter(chunks: list) -> list[str]:
     front_matter 블록은 fields 에 매핑한 키(created_at 등)만 metadata 로 올리고 front matter
     전체는 청크 텍스트에서 뺀다. front matter 만으로
     이루어진 청크가 사라져 8청크 → 7청크가 된다. 여기에 markdown.sections 가 안내 섹션
-    3개를 지워 4청크가 된다(#526). LLM 이 죽어도 이 단정은 유지된다.
+    3개를 지워 4청크가 된다(#526). 모니모 설정은 product_slf 의 본문 200자 미만 청크를 다음 청크에
+    붙이므로(custom_fields 의 body.merge_short) 원문 1·2쪽이 표 청크에 붙어 2청크가 된다.
+    LLM 이 죽어도 이 단정은 유지된다.
     """
     problems = []
     c = chunks[0]
-    if len(chunks) != 4:
-        problems.append(f"청크 4건 기대, 실제 {len(chunks)}건(front matter·안내 섹션 제거 실패)")
+    if len(chunks) != 2:
+        problems.append(f"청크 2건 기대, 실제 {len(chunks)}건(front matter·안내 섹션 제거 또는 짧은 청크 병합 실패)")
     if c.get("created_date") != 20260112:
         problems.append(f"created_at → date_int transform 실패: {c.get('created_date')!r}")
     leaked = [i for i, x in enumerate(chunks)
@@ -744,7 +746,8 @@ def check_sections_selected(product: str, first_page: str):
         stray = [h for h in headers if not h.startswith(f"HEADER: {product} > ")]
         if stray:
             problems.append(f"상품명으로 시작하지 않는 HEADER: {stray}")
-        if not headers or headers[0] != f"HEADER: {product} > {first_page}":
+        # 짧은 청크 병합으로 첫 청크가 여러 쪽에 걸치면 "상품명 > (첫 쪽 | 다음 쪽)" 이 된다.
+        if not headers or not headers[0].replace("(", "", 1).startswith(f"HEADER: {product} > {first_page}"):
             problems.append(f"첫 HEADER 가 '{product} > {first_page}' 가 아닙니다: {headers[:1]}")
         return problems
     return _check

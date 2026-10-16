@@ -362,6 +362,12 @@ class ChunkerCore:
             _log.warning(f"[DocumentProcessor] Unknown chunking.chunk_mode '{self._chunk_mode}', fallback to 'split_only'.")
             self._chunk_mode = "split_only"
 
+        # 본문이 이보다 짧은 청크를 다음 청크로 병합(chunking.short_chunk_size, 기본 0=끔).
+        # 문서유형별 값(custom_fields 의 body.merge_short)과 kwargs 가 우선한다.
+        # 오기입(bool·실수·음수)은 기동 시 실패한다.
+        self._short_chunk_size = cp.parse_short_chunk_size(
+            chunking_cfg.get("short_chunk_size"), "chunking.short_chunk_size") or 0
+
         # 청크 선두 "HEADER: <섹션 경로>" 라인 부착 여부(기본 True). kwargs 의 include_chunk_header 가 우선.
         _ich = _parse_optional_bool(chunking_cfg.get("include_chunk_header"), "chunking.include_chunk_header")
         self._include_chunk_header = True if _ich is None else _ich
@@ -450,20 +456,28 @@ class ChunkerCore:
         chunk_mode = str(kwargs.get('chunk_mode') or self._chunk_mode).strip().lower()
         if chunk_mode not in {"split_only", "resize_all"}:
             chunk_mode = "split_only"
+        doc_metadata = dpx.merge_context_metadata(extract_metadata_from_document(documents), kwargs)
+        short_chunk_size = cp.resolve_short_chunk_size(
+            kwargs, doc_metadata, getattr(self, "_short_chunk_size", 0))
+        # 이상 청크 검증(drop)이 버릴 청크는 짧은 청크 병합에서 뺀다. 붙이면 정상 본문까지 함께 버려진다.
+        validation = cq.config_for(self, kwargs.get("doc_type"))
+        merge_guard = None
+        if short_chunk_size > 0 and validation is not None and validation.drops:
+            merge_guard = cq.rejects_doc_chunk(validation)
         chunker = self.CHUNKER(
             max_tokens = chunk_size if chunk_size is not None else 0,
             merge_peers = True,
             tokenizer = self._tokenizer,
             tokenizer_type = self._tokenizer_type,
             chunk_mode = chunk_mode,
+            short_chunk_size = short_chunk_size,
+            merge_guard = merge_guard,
             # 크기 산정(_size)이 compose_vectors 의 실제 부착 여부와 같은 값을 보게 한다.
             include_chunk_header = _resolve_include_chunk_header(kwargs, self._include_chunk_header),
             table_as_chunk = cp.resolve_table_as_chunk(kwargs, self._table_as_chunk),
             # 문서 접두(chunk_prefix_fields / first_chunk_fields) 몫 예약. compose_vectors 가
             # 같은 metadata 로 같은 문자열을 만들어 실제로 붙인다.
-            chunk_prefix_text = dpx.reserved_prefix_text(
-                kwargs,
-                dpx.merge_context_metadata(extract_metadata_from_document(documents), kwargs)),
+            chunk_prefix_text = dpx.reserved_prefix_text(kwargs, doc_metadata),
         )
 
         cp.apply_table_output_defaults(kwargs, self)
@@ -898,7 +912,7 @@ class ChunkerCore:
             "n_page", "reg_date", "chunk_bboxes", "media_files", "title",
             "created_date", "appendix", "file_path", "metadata", "guardrail_categories",
             cp.BODY_FIELDS_KEY, cp.CHUNK_PREFIX_FIELDS_KEY, cp.FIRST_CHUNK_FIELDS_KEY,
-            cp.FIELD_LABELS_KEY,
+            cp.FIELD_LABELS_KEY, cp.SHORT_CHUNK_SIZE_KEY,
         } | set(tv.field_names()) | consumed_keys
         for reserved_key in reserved_keys:
             passthrough_metadata.pop(reserved_key, None)
@@ -918,7 +932,7 @@ class ChunkerCore:
         # 문서 메타는 모든 청크에 같은 값으로 실려야 한다. 최종 출력과 대조한다(#528).
         # 제어 키와 transform 이 소비한 키는 의도된 제거라 대조하지 않는다.
         control_keys = {cp.BODY_FIELDS_KEY, cp.CHUNK_PREFIX_FIELDS_KEY, cp.FIRST_CHUNK_FIELDS_KEY,
-                        cp.FIELD_LABELS_KEY} | set(tv.field_names()) | consumed_keys
+                        cp.FIELD_LABELS_KEY, cp.SHORT_CHUNK_SIZE_KEY} | set(tv.field_names()) | consumed_keys
         # body_fields 에 오른 필드는 청크 본문으로 바뀌는 것이 계약이라 대조하지 않는다.
         doc_expected_meta = {
             key: serialize_metadata_value_for_output(value)
