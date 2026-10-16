@@ -138,13 +138,14 @@ def check_front_matter(chunks: list) -> list[str]:
     전체는 청크 텍스트에서 뺀다. front matter 만으로
     이루어진 청크가 사라져 8청크 → 7청크가 된다. 여기에 markdown.sections 가 안내 섹션
     3개를 지워 4청크가 된다(#526). 모니모 설정은 product_slf 의 본문 200자 미만 청크를 다음 청크에
-    붙이므로(custom_fields 의 body.merge_short) 원문 1·2쪽이 표 청크에 붙어 2청크가 된다.
+    합치므로(custom_fields 의 body.merge_short) 짧은 원문 1·2쪽이 묶여 독립 청크 하나가 되고, 표 청크
+    2개와 함께 3청크가 된다(#535 — 묶음이 기준 이상이면 표 청크에 붙이지 않는다).
     LLM 이 죽어도 이 단정은 유지된다.
     """
     problems = []
     c = chunks[0]
-    if len(chunks) != 2:
-        problems.append(f"청크 2건 기대, 실제 {len(chunks)}건(front matter·안내 섹션 제거 또는 짧은 청크 병합 실패)")
+    if len(chunks) != 3:
+        problems.append(f"청크 3건 기대, 실제 {len(chunks)}건(front matter·안내 섹션 제거 또는 짧은 청크 병합 실패)")
     if c.get("created_date") != 20260112:
         problems.append(f"created_at → date_int transform 실패: {c.get('created_date')!r}")
     leaked = [i for i, x in enumerate(chunks)
