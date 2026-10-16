@@ -1591,7 +1591,7 @@ class SmartChunkerBase(BaseChunker):
         DocMeta.doc_items 는 min_length=1 이라 doc_items 가 비지 않도록 원본을 그대로 옮긴다.
 
         short_chunk_size 가 0 보다 크면 본문이 그보다 짧은 청크도 병합한다(섹션 본문이 1~2줄뿐인 경우).
-        짧은 청크를 남기지 않으면서 크기 한도(chunk_size)도 넘기지 않는 것이 계약이다.
+        짧은 청크를 남기지 않는 것이 계약이다. 크기 한도(chunk_size)는 아래 마지막 수단에서만 넘긴다.
           - 연달아 나온 짧은 청크(제목만 있는 청크 포함)는 먼저 한도 안에서 하나로 묶는다. 묶음이
             짧지 않게 되면 독립 청크로 둔다. 큰 청크 하나에 여러 섹션이 쌓이지 않게 하기 위해서다.
           - 묶음이 여전히 짧으면 한도 안에서 다음 청크 앞에, 안 되면 앞 청크 뒤에 붙인다. 상위 섹션
@@ -1605,8 +1605,10 @@ class SmartChunkerBase(BaseChunker):
           - 이상 청크 검증에서 버려질 청크(merge_guard)는 건너뛴다. 산출에서는 그 다음 청크가 뒤쪽이다.
             합친 결과가 버려질 청크가 되는 병합은 하지 않는다.
           - 짧은 청크와 제목만 있는 청크의 텍스트는 본문에 이어붙인다(HEADER 리프 상한에서 제목 유실 방지).
-          - 짧은 청크가 남는 경우는 위 방법이 모두 막힌 때뿐이다: 문서 전체가 짧음, 검증 거절, 붙일
-            이웃이 한도에 가깝고 나눌 수도 없음(표가 들었거나 나누면 어느 한쪽이 기준에 못 미침).
+          - 위 방법이 모두 막히면(붙일 이웃이 한도에 가깝고 나눌 수도 없음 — 표가 들었거나 나누면
+            어느 한쪽이 기준에 못 미침) 한도를 넘겨 다음(없으면 앞) 청크에 붙인다. 넘는 양은 짧은
+            청크 길이(기준 미만)와 HEADER 경로 증가분으로 묶인다.
+          - 짧은 청크가 남는 경우는 문서 전체가 짧을 때와 붙이면 검증에서 버려질 청크가 될 때뿐이다.
         """
         if len(chunks) < 2:
             return chunks
@@ -1783,7 +1785,17 @@ class SmartChunkerBase(BaseChunker):
                     return True, nxt
                 if not last_resort:
                     return False, nxt
-                result.insert(buf_at, donor)  # 붙일 곳이 없다 — 짧은 청크로 남긴다
+                # 한도 안에서는 붙일 곳이 없다 — 짧은 청크를 남기지 않는 것이 우선이므로 한도를 넘겨
+                # 붙인다. 넘는 양은 donor 길이(기준 미만)와 HEADER 경로 증가분으로 묶인다.
+                if nxt is not None and not _is_guarded(
+                        cand := _absorb(donor, nxt, donor_first=True, keep_text=True)):
+                    result.append(cand)
+                    return True, None
+                if prev_i is not None and not _is_guarded(
+                        cand := _absorb(donor, result[prev_i], donor_first=False, keep_text=True)):
+                    result[prev_i] = cand
+                    return True, nxt
+                result.insert(buf_at, donor)  # 붙이면 버려질 청크가 되거나 이웃이 없다 — 짧은 청크로 남긴다
                 return True, nxt
 
             def _settle(nxt: Optional[DocChunk]) -> Optional[DocChunk]:
@@ -1809,8 +1821,7 @@ class SmartChunkerBase(BaseChunker):
                             placed, rest = _place(donor, target, last_resort=False)
                             if placed:
                                 return rest
-                        result.insert(buf_at, _merged(items[:k]))
-                        return titled
+                        return _place(_merged(items[:k]), titled, last_resort=True)[1]
                 return _place(_merged(items), nxt, last_resort=True)[1]
 
             for chunk in chunks:

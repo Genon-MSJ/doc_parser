@@ -198,8 +198,9 @@ def test_merge_never_creates_a_chunk_the_validation_drops():
     assert "\n".join(c.text for c in result).count("해당 특약은") == 10
 
 
-def test_next_section_title_stays_with_its_section():
-    """짧은 각주 뒤의 다음 섹션 제목이 각주 묶음 끝에 남아 자기 섹션과 떨어졌다(실물: hwpx 표 각주 → '5. 종류별 이혼')."""
+def test_short_chunk_merges_over_limit_only_as_last_resort():
+    """이웃이 한도에 가깝고 표가 들어 나눌 수 없으면 한도를 넘겨서라도 붙인다(짧은 청크를 남기지 않음).
+    다음 섹션 제목은 각주 묶음 끝이 아니라 자기 섹션 앞에 놓인다(실물: hwpx 표 각주 → '5. 종류별 이혼')."""
     from docling_core.types.doc.document import TableData
     doc = DoclingDocument(name="sample")
     note = _text_chunk(doc, "1) 다문화 이혼 : 남녀 어느 한쪽이 외국인 또는 귀화자인 경우", "4. 지속기간")
@@ -213,7 +214,7 @@ def test_next_section_title_stays_with_its_section():
         chunk_prefix_text="", CHUNK_PATH_MAX_LEAVES=5)
     result = chunker._merge_heading_only_chunks([note, title, body])
 
-    assert [c.text for c in result] == [note.text, f"{title.text}\n{body.text}"]
+    assert [c.text for c in result] == [f"{note.text}\n{title.text}\n{body.text}"]
 
 
 def test_trailing_short_skips_dropped_chunk_to_merge_backward():
