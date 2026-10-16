@@ -302,6 +302,37 @@ def test_row_serialization_appends_only_that_piece_rows_within_budget():
 
 
 @pytest.mark.unit
+def test_blank_data_rows_are_dropped_before_split():
+    """OCR 레이아웃 표(상품설명서 116쪽 캡쳐): 빈 thead 아래 빈 행이 데이터 행 사이와 표 끝에 있다.
+
+    빈 행이 분할 단위로 남으면 표 끝의 빈 행이 홀로 조각이 되어 `설명 + 빈 헤더 + 빈 행` 만 담긴
+    청크가 나오고, 행 문장(빈 행을 건너뛴다)이 다른 조각의 행에 붙는다.
+    """
+    blank = lambda: [Cell("", c) for c in range(4)]
+    grid = [[Cell("", c, column_header=True) for c in range(4)],
+            [Cell("보장명", 0), Cell("", 1), Cell("지급사유", 2), Cell("지급금액", 3)], blank()]
+    for n in range(1, 9):
+        grid.append([Cell("", 0), Cell(f"ROW-{n:02d}-START", 1),
+                     Cell("가" * 40, 2), Cell(f"가입금액의 {n}%", 3)])
+        grid.append(blank())
+    grid.append(blank())
+    result = split_table_rows(
+        grid=grid, num_cols=4, single_text="X" * 3000, limit=400, count_text=len,
+        table_format="markdown", header_row_count=1,
+        prefix="[표 검색 설명]\n특정치료비 보장 내역이다.\n", row_serialization=True,
+    )
+
+    assert result.did_split
+    for piece in result.pieces:
+        body, _, summary = piece.partition(ROW_LINES_LABEL)
+        rows = body.strip().splitlines()[4:]      # 설명 라벨·설명·헤더·구분선 다음이 데이터 행
+        assert rows and all(row.replace("|", "").strip() for row in rows)
+        for n in range(1, 9):
+            marker = f"ROW-{n:02d}-START"
+            assert (marker in summary) == (marker in body)
+
+
+@pytest.mark.unit
 def test_row_serialization_off_by_default():
     grid = _grid(rows=6)
     result = split_table_rows(

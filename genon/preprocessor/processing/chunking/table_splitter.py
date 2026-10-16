@@ -167,7 +167,14 @@ def split_table_rows(
     if normalized_spans:
         grid = normalize_row_spans(grid)
     header_rows = list(grid[:header_row_count])
-    data_rows = list(grid[header_row_count:])
+    # 값이 하나도 없는 데이터 행은 분할 단위에서 뺀다. 단일 청크 경로는 같은 행을
+    # drop_blank_markdown_rows 로 지우는데 여기서 남기면, 표 끝의 빈 행이 홀로 조각이 되어
+    # 표 설명 접두와 빈 표만 담긴 청크가 나온다. 또 serialize_rows 는 빈 행을 건너뛰므로
+    # 남겨 두면 행 문장 목록과 행 인덱스가 어긋난다.
+    data_rows = [
+        row for row in grid[header_row_count:]
+        if any(_cell_text(cell) for cell in row)
+    ]
 
     header_labels = flatten_header_rows(grid, header_row_count, num_cols)
 
