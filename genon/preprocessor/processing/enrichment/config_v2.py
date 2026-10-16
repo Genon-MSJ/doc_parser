@@ -38,7 +38,7 @@ from __future__ import annotations
 import difflib
 from typing import Any
 
-from ..common import model_preset
+from ..common import config_parse, model_preset
 from . import config_schema
 from .file_source import FILE_ALIAS, FILE_FIELDS_KEY
 
@@ -395,10 +395,10 @@ def _normalize_body(body: Any, kind: str, out: dict, label: str) -> None:
     if not body:
         return
     _check_unknown(body, BODY_KEYS, label, "body")
-    merge_short = body.get("merge_short")
-    if merge_short is not None and (
-            isinstance(merge_short, bool) or not isinstance(merge_short, int) or merge_short < 0):
-        raise ConfigV2Error(f"{label}: body.merge_short 는 0 이상의 정수여야 합니다(지금: {merge_short!r}).")
+    try:
+        config_parse.parse_short_chunk_size(body.get("merge_short"), "body.merge_short")
+    except ValueError as exc:
+        raise ConfigV2Error(f"{label}: {exc}") from None
     for v2_key, v1_key in _BODY_TO_V1.items():
         if body.get(v2_key) is not None:
             out[v1_key] = body[v2_key]

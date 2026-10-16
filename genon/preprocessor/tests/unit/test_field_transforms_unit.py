@@ -287,10 +287,10 @@ def test_extract_then_apply_pipeline():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("facade", ["chunking", "intelligent", "convert"])
+@pytest.mark.parametrize("facade", ["intelligent", "convert"])
 def test_short_chunk_size_control_key_is_not_a_chunk_field(facade):
     """custom_fields 의 body.merge_short 는 공용 enricher 가 문서 metadata 에 싣는 청커 제어키다.
-    청커가 아닌 facade 도 같은 enricher 산출을 받으므로, 어느 facade 에서도 청크 필드로 나가면 안 된다.
+    청커가 아닌 facade 도 같은 enricher 산출을 받으므로 청크 필드로 나가면 안 된다(청커는 core 가 뺀다).
 
     모델 기동을 피하려고 __init__ 을 우회하고 compose_vectors 가 읽는 속성만 채운다.
     """

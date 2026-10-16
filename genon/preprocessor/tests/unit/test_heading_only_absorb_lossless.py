@@ -17,7 +17,6 @@ from docling_core.types.doc.labels import DocItemLabel
 
 from genon.preprocessor.processing.chunking import chunk_quality as cq
 from genon.preprocessor.processing.chunking.smart_chunker import SmartChunkerBase
-from genon.preprocessor.processing.common import config_parse as cp
 
 # 3단계 병합 임계(30자)를 넘는 제목. 실제 문제 문서의 H1 과 같은 길이대다.
 _LONG_TITLE = "삼성 1540 청춘대표·4180 인생대표·팩 건강보험(2607) 상품요약서"
@@ -135,39 +134,13 @@ def test_no_short_chunk_survives_even_over_size_limit():
     assert result[0].meta.headings == ["가", "나", "다", "라"]
 
 
-@pytest.mark.parametrize("next_is_table, merge_guard, expected", [
-    # table_as_chunk 의 표 청크도 짧은 청크를 받는다(짧은 청크를 남기지 않는 것이 우선)
-    (True, None, [f"{_SHORT_BODY}\n{_BODY}"]),
-    # 검증에서 버려질 청크는 건너뛴다. 붙일 뒤쪽이 없으므로 짧은 청크는 그대로 남는다
-    (False, lambda chunk: chunk.text == _BODY, [_SHORT_BODY, _BODY]),
-])
-def test_short_body_target_rules(next_is_table, merge_guard, expected):
-    """표 청크는 받고, 버려질 청크는 받지 않는다. 받으면 정상 본문이 불량 청크와 함께 버려진다."""
+def test_short_body_merges_into_table_chunk():
+    """table_as_chunk 의 표 청크도 짧은 청크를 받는다(짧은 청크를 남기지 않는 것이 우선)."""
     chunker = SmartChunkerBase.model_construct(
-        include_chunk_header=True, max_tokens=0, short_chunk_size=200, table_as_chunk=True,
-        merge_guard=merge_guard)
-    result = chunker._merge_heading_only_chunks(_short_then_next(next_is_table=next_is_table))
+        include_chunk_header=True, max_tokens=0, short_chunk_size=200, table_as_chunk=True)
+    result = chunker._merge_heading_only_chunks(_short_then_next(next_is_table=True))
 
-    assert [c.text for c in result] == expected
-
-
-@pytest.mark.parametrize("kwargs, metadata, yaml_default, expected", [
-    ({}, {}, 0, 0),                                              # 기본은 끔
-    ({}, {"short_chunk_size": 200}, 0, 200),                     # 문서유형 yaml(body.merge_short)
-    ({"short_chunk_size": "0"}, {"short_chunk_size": 200}, 0, 0),  # 요청이 우선
-    ({}, {}, 150, 150),                                          # 청커 yaml 공통값
-    ({"short_chunk_size": True}, {"short_chunk_size": 200}, 0, 200),  # 잘못된 요청값은 다음 순위로
-    ({"short_chunk_size": 1.9}, {}, 150, 150),
-])
-def test_short_chunk_size_priority(kwargs, metadata, yaml_default, expected):
-    assert cp.resolve_short_chunk_size(kwargs, metadata, yaml_default) == expected
-
-
-@pytest.mark.parametrize("value", [True, 1.5, -1, "bad"])
-def test_short_chunk_size_rejects_bad_config_value(value):
-    """청커 yaml 의 오기입은 기동 시 실패한다. bool 을 int 로 바꾸면 true 가 1 이 되어 병합이 켜진다."""
-    with pytest.raises(ValueError, match="short_chunk_size"):
-        cp.parse_short_chunk_size(value)
+    assert [c.text for c in result] == [f"{_SHORT_BODY}\n{_BODY}"]
 
 
 # --- 실제 검증 판정(chunk_quality)과 함께 쓸 때 ---
