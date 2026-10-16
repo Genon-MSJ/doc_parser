@@ -118,20 +118,52 @@ def _text_chunk(doc, text, heading):
     return DocChunk(text=text, meta=DocMeta(doc_items=[item], headings=[heading]))
 
 
-def test_no_short_chunk_survives_even_over_size_limit():
-    """연속한 짧은 청크는 크기 한도를 넘어도 모두 뒤 청크에, 뒤가 없는 것만 앞 청크에 붙는다."""
+_LINE = "보험금은 약관에서 정한 지급사유가 발생한 경우에 지급합니다."  # 33자
+
+
+def _full_chunk(doc, heading, lines=11):
+    """한도(400) 가까이 찬 본문 청크. 줄 경계에서 다시 나눌 수 있다."""
+    return _text_chunk(doc, "\n".join([_LINE] * lines), heading)
+
+
+@pytest.mark.parametrize("layout", [
+    "short_pages_run",      # 짧은 쪽 20개 연속 → 정상 쪽 (예전: 한 청크로 쌓여 한도의 몇 배)
+    "short_before_full",    # 문서 첫머리 짧은 쪽 → 꽉 찬 청크 (예전: 붙인 만큼 한도 초과)
+    "short_after_full",     # 꽉 찬 청크 → 문서 끝 짧은 쪽
+])
+def test_short_merge_keeps_size_limit_without_short_chunks(layout):
+    """짧은 청크를 남기지 않으면서 어떤 청크도 한도를 넘지 않고, 본문은 순서대로 모두 남는다."""
     doc = DoclingDocument(name="sample")
-    chunks = [_text_chunk(doc, "보험기간은 1년입니다.", "가"),
-              _text_chunk(doc, "납입은 일시납입니다.", "나"),
-              _text_chunk(doc, _BODY, "다"),
-              _text_chunk(doc, "문의 1588-3114", "라")]
+    short = lambda i: _text_chunk(doc, f"원문 {i}쪽 안내 문장입니다.", f"원문 {i}쪽")
+    chunks = {
+        "short_pages_run": [short(i) for i in range(20)] + [_full_chunk(doc, "본문", lines=5)],
+        "short_before_full": [short(0), _full_chunk(doc, "본문")],
+        "short_after_full": [_full_chunk(doc, "본문"), short(0)],
+    }[layout]
     chunker = SmartChunkerBase.model_construct(
-        include_chunk_header=True, max_tokens=len(_BODY), short_chunk_size=200)
+        include_chunk_header=True, max_tokens=400, short_chunk_size=100,
+        chunk_prefix_text="", CHUNK_PATH_MAX_LEAVES=5)
     result = chunker._merge_heading_only_chunks(chunks)
 
-    assert [c.text for c in result] == [
-        f"보험기간은 1년입니다.\n납입은 일시납입니다.\n{_BODY}\n문의 1588-3114"]
-    assert result[0].meta.headings == ["가", "나", "다", "라"]
+    sizes = [len(chunker._header_line(c.meta.headings, True) + c.text) for c in result]
+    assert max(sizes) <= 400, sizes
+    assert min(len(c.text) for c in result) >= 100
+    assert "\n".join(c.text for c in result) == "\n".join(c.text for c in chunks)
+
+
+def test_short_run_stays_out_of_table_chunk():
+    """짧은 쪽들이 묶여 짧지 않게 되면 독립 청크로 둔다. 표가 든 다음 청크에 섞이지 않는다."""
+    doc = DoclingDocument(name="sample")
+    pages = [_text_chunk(doc, "여행 중 상해나 질병으로 치료를 받으면 실제 치료비를 보상합니다. " * 2, "원문 1쪽"),
+             _text_chunk(doc, "전쟁·테러 지역 여행은 인수가 제한됩니다. 현금은 보상하지 않습니다.", "원문 2쪽")]
+    from docling_core.types.doc.document import TableData
+    table = DocChunk(text="| 구분 | 내용 |", meta=DocMeta(
+        doc_items=[doc.add_table(data=TableData(num_rows=1, num_cols=2))], headings=["원문 3쪽"]))
+    chunker = SmartChunkerBase.model_construct(
+        include_chunk_header=True, max_tokens=1500, short_chunk_size=100, table_as_chunk=True)
+    result = chunker._merge_heading_only_chunks([*pages, table])
+
+    assert [c.text for c in result] == [f"{pages[0].text}\n{pages[1].text}", table.text]
 
 
 def test_short_body_merges_into_table_chunk():
@@ -161,6 +193,18 @@ def test_merge_never_creates_a_chunk_the_validation_drops():
 
     assert not any(_DROP(c) for c in result)
     assert "\n".join(c.text for c in result).count("해당 특약은") == 10
+
+
+def test_trailing_short_skips_dropped_chunk_to_merge_backward():
+    """문서 끝 짧은 청크 바로 앞이 버려질 청크면 그 앞의 정상 청크에 붙는다(실물: 상품요약서 7쪽)."""
+    doc = DoclingDocument(name="sample")
+    body = "\n".join([_LINE] * 7)  # 기준(200) 이상인 정상 청크
+    chunks = [_text_chunk(doc, body, "가"),
+              _text_chunk(doc, "x", "나"),                       # 너무 짧아 검증에서 버려진다
+              _text_chunk(doc, "사고 접수 후 청구서를 앱에 올립니다.", "다")]
+    result = _force(merge_guard=_DROP)._merge_heading_only_chunks(chunks)
+
+    assert [c.text for c in result if not _DROP(c)] == [f"{body}\n사고 접수 후 청구서를 앱에 올립니다."]
 
 
 def test_formula_chunk_kept_by_validation_is_not_skipped():
