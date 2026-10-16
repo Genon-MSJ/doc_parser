@@ -15,7 +15,9 @@ from docling_core.transforms.chunker import DocChunk, DocMeta
 from docling_core.types import DoclingDocument
 from docling_core.types.doc.labels import DocItemLabel
 
+from genon.preprocessor.processing.chunking import chunk_quality as cq
 from genon.preprocessor.processing.chunking.smart_chunker import SmartChunkerBase
+from genon.preprocessor.processing.common import config_parse as cp
 
 # 3단계 병합 임계(30자)를 넘는 제목. 실제 문제 문서의 H1 과 같은 길이대다.
 _LONG_TITLE = "삼성 1540 청춘대표·4180 인생대표·팩 건강보험(2607) 상품요약서"
@@ -75,3 +77,140 @@ def test_trailing_title_merges_backward_losslessly():
     assert len(result) == 1
     assert _LONG_TITLE in result[0].text
     assert result[0].text.index(_BODY) < result[0].text.index(_LONG_TITLE)
+
+
+# --- 짧은 본문 청크 병합(short_chunk_size) ---
+# 상품설명서는 본문이 1~2줄뿐인 섹션이 많아 HEADER 경로가 대부분인 청크가 생긴다. 장이 바뀌어도
+# 다음 청크에 붙이고, 끄면(0) 지금과 같아야 한다.
+_SHORT_BODY = "벌금은 1사고당 2천만원 한도로 보상합니다."
+
+
+def _short_then_next(next_is_table: bool = False):
+    """짧은 본문 청크(제1장) + 다음 청크(제2장). next_is_table 이면 다음 청크가 표다."""
+    doc = DoclingDocument(name="sample")
+    short_item = doc.add_text(label=DocItemLabel.TEXT, text=_SHORT_BODY)
+    if next_is_table:
+        from docling_core.types.doc.document import TableData
+        next_item = doc.add_table(data=TableData(num_rows=1, num_cols=1))
+    else:
+        next_item = doc.add_text(label=DocItemLabel.TEXT, text=_BODY)
+    return [
+        DocChunk(text=_SHORT_BODY, meta=DocMeta(doc_items=[short_item], headings=["제1장 > 2. 벌금"])),
+        DocChunk(text=_BODY, meta=DocMeta(doc_items=[next_item], headings=["제2장 > 1. 보장"])),
+    ]
+
+
+@pytest.mark.parametrize("short_chunk_size, merged", [(0, False), (200, True)])
+def test_short_body_merges_into_next_chunk_across_chapters(short_chunk_size, merged):
+    chunker = SmartChunkerBase.model_construct(
+        include_chunk_header=True, max_tokens=0, short_chunk_size=short_chunk_size)
+    result = chunker._merge_heading_only_chunks(_short_then_next())
+
+    if not merged:
+        assert [c.text for c in result] == [_SHORT_BODY, _BODY]
+        return
+    assert len(result) == 1
+    assert result[0].text == f"{_SHORT_BODY}\n{_BODY}"
+    assert result[0].meta.headings == ["제1장 > 2. 벌금", "제2장 > 1. 보장"]
+
+
+def _text_chunk(doc, text, heading):
+    item = doc.add_text(label=DocItemLabel.TEXT, text=text)
+    return DocChunk(text=text, meta=DocMeta(doc_items=[item], headings=[heading]))
+
+
+def test_no_short_chunk_survives_even_over_size_limit():
+    """연속한 짧은 청크는 크기 한도를 넘어도 모두 뒤 청크에, 뒤가 없는 것만 앞 청크에 붙는다."""
+    doc = DoclingDocument(name="sample")
+    chunks = [_text_chunk(doc, "보험기간은 1년입니다.", "가"),
+              _text_chunk(doc, "납입은 일시납입니다.", "나"),
+              _text_chunk(doc, _BODY, "다"),
+              _text_chunk(doc, "문의 1588-3114", "라")]
+    chunker = SmartChunkerBase.model_construct(
+        include_chunk_header=True, max_tokens=len(_BODY), short_chunk_size=200)
+    result = chunker._merge_heading_only_chunks(chunks)
+
+    assert [c.text for c in result] == [
+        f"보험기간은 1년입니다.\n납입은 일시납입니다.\n{_BODY}\n문의 1588-3114"]
+    assert result[0].meta.headings == ["가", "나", "다", "라"]
+
+
+@pytest.mark.parametrize("next_is_table, merge_guard, expected", [
+    # table_as_chunk 의 표 청크도 짧은 청크를 받는다(짧은 청크를 남기지 않는 것이 우선)
+    (True, None, [f"{_SHORT_BODY}\n{_BODY}"]),
+    # 검증에서 버려질 청크는 건너뛴다. 붙일 뒤쪽이 없으므로 짧은 청크는 그대로 남는다
+    (False, lambda chunk: chunk.text == _BODY, [_SHORT_BODY, _BODY]),
+])
+def test_short_body_target_rules(next_is_table, merge_guard, expected):
+    """표 청크는 받고, 버려질 청크는 받지 않는다. 받으면 정상 본문이 불량 청크와 함께 버려진다."""
+    chunker = SmartChunkerBase.model_construct(
+        include_chunk_header=True, max_tokens=0, short_chunk_size=200, table_as_chunk=True,
+        merge_guard=merge_guard)
+    result = chunker._merge_heading_only_chunks(_short_then_next(next_is_table=next_is_table))
+
+    assert [c.text for c in result] == expected
+
+
+@pytest.mark.parametrize("kwargs, metadata, yaml_default, expected", [
+    ({}, {}, 0, 0),                                              # 기본은 끔
+    ({}, {"short_chunk_size": 200}, 0, 200),                     # 문서유형 yaml(body.merge_short)
+    ({"short_chunk_size": "0"}, {"short_chunk_size": 200}, 0, 0),  # 요청이 우선
+    ({}, {}, 150, 150),                                          # 청커 yaml 공통값
+    ({"short_chunk_size": True}, {"short_chunk_size": 200}, 0, 200),  # 잘못된 요청값은 다음 순위로
+    ({"short_chunk_size": 1.9}, {}, 150, 150),
+])
+def test_short_chunk_size_priority(kwargs, metadata, yaml_default, expected):
+    assert cp.resolve_short_chunk_size(kwargs, metadata, yaml_default) == expected
+
+
+@pytest.mark.parametrize("value", [True, 1.5, -1, "bad"])
+def test_short_chunk_size_rejects_bad_config_value(value):
+    """청커 yaml 의 오기입은 기동 시 실패한다. bool 을 int 로 바꾸면 true 가 1 이 되어 병합이 켜진다."""
+    with pytest.raises(ValueError, match="short_chunk_size"):
+        cp.parse_short_chunk_size(value)
+
+
+# --- 실제 검증 판정(chunk_quality)과 함께 쓸 때 ---
+_DROP = cq.rejects_doc_chunk(cq.Config(action="drop"))
+
+
+def _force(**kwargs):
+    return SmartChunkerBase.model_construct(
+        include_chunk_header=True, max_tokens=0, short_chunk_size=200, **kwargs)
+
+
+def test_merge_never_creates_a_chunk_the_validation_drops():
+    """하나하나는 정상인 같은 안내 문구 10개를 합치면 반복으로 판정되어 문서 전체가 실패했다.
+    합친 결과가 버려질 청크가 되는 병합은 하지 않는다."""
+    doc = DoclingDocument(name="sample")
+    chunks = [_text_chunk(doc, "해당 특약은 가입 시 선택할 수 있습니다.", f"특약{i}") for i in range(10)]
+    result = _force(merge_guard=_DROP)._merge_heading_only_chunks(chunks)
+
+    assert not any(_DROP(c) for c in result)
+    assert "\n".join(c.text for c in result).count("해당 특약은") == 10
+
+
+def test_formula_chunk_kept_by_validation_is_not_skipped():
+    """검증은 수식 청크를 길이 하한에서 예외로 둔다. 같은 판정을 쓰지 않으면 살아남는 수식 청크를
+    건너뛰어 [가, 수식, 다] 가 [가+다, 수식] 으로 뒤집혔다."""
+    doc = DoclingDocument(name="sample")
+    formula = doc.add_text(label=DocItemLabel.FORMULA, text="x=1")
+    chunks = [_text_chunk(doc, "납입 조건은 아래 수식을 적용합니다.", "가"),
+              DocChunk(text="x=1", meta=DocMeta(doc_items=[formula], headings=["나"])),
+              _text_chunk(doc, "일반 설명이 담긴 다음 문단입니다.", "다")]
+    result = _force(merge_guard=_DROP)._merge_heading_only_chunks(chunks)
+
+    text = "\n".join(c.text for c in result)
+    assert text.index("납입 조건") < text.index("x=1") < text.index("일반 설명")
+
+
+def test_heading_only_titles_survive_header_leaf_limit():
+    """HEADER 는 경로를 5개까지만 렌더한다. 제목을 경로로만 남기면 6번째부터 산출물에서 사라졌다."""
+    doc = DoclingDocument(name="sample")
+    titles = [f"독립항목{i}" for i in range(8)]
+    chunks = [DocChunk(text=t, meta=DocMeta(doc_items=[doc.add_title(text=t)], headings=[t]))
+              for t in titles] + [_text_chunk(doc, _BODY, "본문")]
+    result = _force()._merge_heading_only_chunks(chunks)
+
+    assert len(result) == 1
+    assert all(t in result[0].text for t in titles)

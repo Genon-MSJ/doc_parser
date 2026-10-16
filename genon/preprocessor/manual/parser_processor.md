@@ -1519,6 +1519,7 @@ fields:
 | 모든 청크에 반복 접두 | `body.repeat` (`chunk_prefix_fields`) | ✔ split 시만 | ✔ split 시만 | ✗ 주의³ | ✔ |
 | 첫 청크에만 1회 | `body.once` (`first_chunk_fields`) | ✗ | ✗ | ✔ | ✔ |
 | 본문을 메타 필드에 복사 | `body.mirror_to` (`body_fields`) | ✗ | ✗ | ✗ | ✔ |
+| 짧은 청크를 다음 청크에 병합 | `body.merge_short` (`short_chunk_size`) | ✗ | ✗ | ✗ | ✔ |
 
 ¹ sections 의 `body.fields` 는 본문 구성이 아니라 **공통 필드를 청크 접두에 실을지 정하는 스위치**입니다.
 본문은 트리 순회가 만듭니다.

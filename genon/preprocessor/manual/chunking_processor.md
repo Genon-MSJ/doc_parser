@@ -68,6 +68,7 @@
 | `params.document` | body | 파서 응답의 `data` 를 그대로. **인라인이 우선** |
 | `params.chunk_size` | body | 청크 상한. yaml 보다 우선 |
 | `params.chunk_mode` | body | `split_only` / `resize_all` |
+| `params.short_chunk_size` | body | 짧은 청크 병합 기준. yaml 보다 우선 |
 | `params.include_chunk_header` | body | `HEADER:` 라인 on/off (0/1 또는 on/off) |
 | `params.table_as_chunk` | body | 표를 독자 청크로 |
 | `params.text_cleanup` | body | `off` / `safe` |
@@ -114,6 +115,7 @@
 |---|---|---|
 | `chunk_size` | `1500` | 청크 상한. **0 = 분할 안 함.** docling 경로는 0 초과 시 **최소 1024 로 보정**됩니다 |
 | `chunk_mode` | `split_only` | 아래 절 참조 |
+| `short_chunk_size` | `0`(끔) | 본문이 이보다 짧은 청크를 다음 청크에 병합. [짧은 청크 병합](#짧은-청크-병합) 참조 |
 | `table_as_chunk` | `true` | 표를 본문과 섞지 않고 독자 청크로 |
 | `include_chunk_header` | `true` | 청크 선두 `HEADER: <섹션 경로>` 라인 |
 | `text_cleanup` | `off` | `safe` 로 켜면 문자 노이즈 제거 + 사이트 규칙 |
@@ -178,6 +180,48 @@
 
 **섹션 인식은 정규식이 아닙니다.** docling 이 붙인 라벨(`SECTION_HEADER`/`TITLE`)로 판정합니다.
 "제N조" 같은 텍스트 패턴으로 자르고 싶다면 코드 수정이 필요합니다(아래 "코드에서 고칠 자리").
+
+### 짧은 청크 병합
+
+`split_only` 는 섹션 하나가 청크 하나이므로, 섹션 제목만 있거나 본문이 1~2줄인 섹션은 짧은 청크가
+됩니다. 이런 청크는 `HEADER:` 경로가 내용의 대부분이라 제목 검색어로 상위에 오르지만 답변 근거는
+주지 못합니다.
+
+- 기준값이 0(기본)이면 **제목만 있는 청크**만 다음 청크로 병합합니다(문서 끝이면 앞 청크로). 붙이면
+  `chunk_size` 를 넘거나 제목이 산출물에 남지 않는 경우에는 붙이지 않고 그대로 둡니다.
+- 기준값을 0 보다 크게 두면 본문(`HEADER:` 라인 제외)이 그보다 짧은 청크도 **다음 청크 본문 앞에**
+  붙고, **짧은 청크를 남기지 않는 것**이 우선합니다. 제목만 있는 청크도 같은 규칙을 따릅니다.
+  - 짧은 청크가 연달아 나와도 모두 다음 청크에 붙습니다. 상위 섹션(장)이 바뀌어도 붙이고,
+    `HEADER:` 에는 경로가 함께 남습니다.
+  - 붙인 청크의 텍스트(제목 포함)는 본문에 그대로 이어붙습니다. 경로가 5개를 넘으면 `HEADER:` 가
+    `… 외 N개` 로 줄어들어, 경로만으로는 제목이 남지 않기 때문입니다.
+  - 붙인 만큼 `chunk_size` 를 넘을 수 있습니다(넘는 양은 붙인 짧은 청크의 길이 합입니다).
+  - 다음 청크가 표 청크(`table_as_chunk: true`)여도 붙습니다. 표 청크 자체는 짧아도 병합하지 않습니다.
+  - 이상 청크 검증(`validation.action: drop`)에서 버려질 청크는 건너뛰고 그 다음 청크에 붙습니다.
+    붙이면 정상 본문이 불량 청크와 함께 버려지기 때문입니다.
+  - 합친 결과가 검증에서 버려질 청크가 되면(예: 같은 안내 문구가 여러 번 이어져 반복으로 판정)
+    그 병합은 하지 않습니다. 이때만 짧은 청크가 남습니다.
+  - **뒤쪽 청크가 없을 때만** 앞 청크에 붙습니다.
+  - 문서 전체가 기준보다 짧으면 청크 하나로 남습니다.
+- 단위는 `chunk_size` 와 같습니다(`char` 모드면 문자 수). 켜면 청크 경계가 바뀌므로 재색인이 필요합니다.
+
+권장값은 **200** 입니다. 본문 200자 미만이면 `HEADER:` 경로(보통 50~90자)가 청크의 30% 이상을
+차지하고, 그 정도 본문은 1~2문장이라 독립된 검색 단위로서 정보가 부족합니다.
+
+문서유형마다 다르게 두려면 그 문서유형의 custom_fields yaml 에 `body.merge_short` 로 적습니다
+(문서형 `source.kind: document` 전용). 값은 파서 결과에 실려 청커로 전달되므로, 바꾸면 **파싱부터**
+다시 해야 반영됩니다. 0 이상의 정수가 아니면 기동 시 실패합니다(청커 설정 `chunking.short_chunk_size` 도
+같습니다). 요청 파라미터의 잘못된 값은 경고를 남기고 다음 순위 값을 씁니다.
+
+```yaml
+# custom_field_product_slf.yaml
+body:
+  once: [created_date]
+  merge_short: 200
+```
+
+우선순위는 앞이 셉니다 — 요청 파라미터 `short_chunk_size`(facade `CONFIG_BY_DOC_TYPE` 포함) →
+custom_fields `body.merge_short` → 청커 설정 `chunking.short_chunk_size` → 0.
 
 ### `HEADER:` 라인
 
