@@ -484,9 +484,17 @@ def check_table_text_formats(chunks: list) -> list[str]:
         problems.append(
             f"표기형태 필드가 일부 청크에만 있습니다 {len(present)}/{len(chunks)}건")
 
-    def tokens(text: str) -> list:
-        """표기형태를 지운 내용 토큰. 태그·파이프·markdown 구분선을 걷어낸다."""
+    import html
+
+    def tokens(text: str, unescape: bool = False) -> list:
+        """표기형태를 지운 내용 토큰. 태그·파이프·markdown 구분선을 걷어낸다.
+
+        HTML 표기는 셀의 `&` 를 `&amp;` 로 적으므로 ``unescape`` 로 엔티티를 푼다. 태그를
+        지운 뒤에 풀어야 셀 값의 `&lt;b&gt;` 가 태그로 지워지지 않는다.
+        """
         text = re.sub(r"<[^>]+>", " ", text or "")
+        if unescape:
+            text = html.unescape(text)
         text = re.sub(r"^\s*\|[\s\-:|]+\|\s*$", " ", text, flags=re.M)
         return [t for t in re.split(r"\s+", text.replace("|", " ")) if t]
 
@@ -497,7 +505,7 @@ def check_table_text_formats(chunks: list) -> list[str]:
             if not value:
                 problems.append(f"[{idx}] {field} 가 비어 있습니다")
                 continue
-            got = tokens(value)
+            got = tokens(value, unescape=field == "text_table_html")
             if got == base:
                 continue
             # 병합 셀(colspan)을 markdown 으로 펴면 값이 컬럼마다 복제된다 — 손실만 문제다.

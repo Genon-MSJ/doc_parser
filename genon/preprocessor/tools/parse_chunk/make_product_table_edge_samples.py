@@ -95,12 +95,11 @@ IN_SITU = (
     '제자리암종(D02), 제자리흑색종(D03), 피부의 제자리암종(D04), 유방의 제자리암종(D05), 자궁경부의 '
     '제자리암종(D06), 기타 및 상세불명의 생식기관의 제자리암종(D07), 기타 및 상세불명 부위의 제자리암종(D09)'
 )
-# 공백 없이 쉼표로만 이은 링크 목록. 문단·문장·공백 경계가 하나도 없다. `&` 가 든 URL 은 뺐다.
-# HTML 표기형태가 `&amp;` 로 이스케이프한 값을 표기형태 단정(check_table_text_formats)이
-# 내용 소실로 오판하기 때문이다.
+# 공백 없이 쉼표로만 이은 링크 목록. 문단·문장·공백 경계가 하나도 없다.
 LINKS = ','.join((
     'https://static11.samsungcard.com/wcms/home/scard/personal/__icsFiles/afieldfile/2026/05/28/AAP1913_bg.png',
-    'https://www.samsungcard.com/home/card/cardinfo/PGHPPCCCardCardinfoDetails001?code=AAP1913',
+    'https://www.samsungcard.com/home/card/cardinfo/PGHPPCCCardCardinfoDetails001?code=AAP1913'
+    '&click=UHPPCO0101M0_card_PGHPPCCCardCardinfoDetails001_PRD_AAP1913',
     'https://static11.samsungcard.com/wcms/home/scard/image/personal/DN_AAP1913.gif',
     'https://inc-kms2.example.invalid/okmsView/dictionary/31/237219/10',
     'https://inc-kms2.example.invalid/okmsView/dictionary/31/237220/10',
