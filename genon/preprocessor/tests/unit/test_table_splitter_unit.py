@@ -233,6 +233,70 @@ def test_multi_header_markdown_piece_has_exactly_one_header_row_then_separator()
         assert len({line.count("|") for line in lines}) == 1
 
 
+# ─── colspan 병합 셀 (#539, monimo_product_slf_span_table_sample.md) ───────────
+
+def _spanned(text, start, span, **flags):
+    """docling grid 처럼 병합 셀 하나를 피복 컬럼마다 같은 객체로 채운다."""
+    cell = Cell(text, start, col_span=span, **flags)
+    return [cell] * span
+
+
+_CLAUSE = "㈜ 1. 보험료 납입기간 중 주계약의 보험료 납입 면제 사유가 발생하였을 경우 " + "가" * 200
+
+
+@pytest.mark.unit
+def test_tbody_colspan_clause_is_written_once_in_table_and_row_summary():
+    """11쪽 표: tbody 전체 폭 조항(colspan=3)이 표에 3회, 행 요약에 3회 실려 조각이 한도를 넘었다."""
+    grid = [
+        [Cell("특약명", 0, column_header=True), Cell("지급사유", 1, column_header=True),
+         Cell("지급금액", 2, column_header=True)],
+        _spanned(_CLAUSE, 0, 3),
+    ]
+    for n in range(1, 4):
+        grid.append([Cell("3대안과질환 수술보장특약", 0, row_span=3),
+                     Cell(f"ROW-{n:02d}-START □ 수술보험금 " + "나" * 80, 1), Cell("50만원", 2)])
+    grid.append(_spanned(_CLAUSE, 0, 3))
+    result = split_table_rows(
+        grid=grid, num_cols=3, single_text="X" * 3000, limit=700, count_text=len,
+        table_format="markdown", header_row_count=1, row_serialization=True,
+    )
+
+    assert result.did_split and not result.oversized_piece_indexes
+    clause_pieces = [piece for piece in result.pieces if _CLAUSE in piece]
+    assert len(clause_pieces) == 2
+    for piece in clause_pieces:
+        body, _, summary = piece.partition(ROW_LINES_LABEL)
+        assert (body.count(_CLAUSE), summary.count(_CLAUSE)) == (1, 1)
+        assert f"| {_CLAUSE} |  |  |" in body
+    # rowspan 값은 조각 맥락을 위해 행마다 그대로 복제된다.
+    assert "\n".join(result.pieces).count("특약명=3대안과질환 수술보장특약") == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("header, data_cols", [
+    # 13쪽 표: thead 의 유일한 셀이 전체 폭(colspan=4) 조항이다.
+    (_spanned(_CLAUSE, 0, 4, column_header=True), 4),
+    # 6쪽 표: 두 번째 헤더 셀이 나머지 두 컬럼을 덮는 긴 설명(colspan=2)이다.
+    ([Cell("보존치료 보험금", 0, column_header=True), *_spanned(_CLAUSE, 1, 2, column_header=True)], 3),
+], ids=["full-width", "partial-width"])
+def test_merged_header_without_sub_header_is_not_repeated_as_column_label(header, data_cols):
+    """하위 헤더 없는 긴 병합 헤더가 모든 컬럼 라벨이 되어 표 헤더와 행 요약에 컬럼 수만큼 실렸다."""
+    grid = [header]
+    for n in range(1, 5):
+        grid.append([Cell(f"ROW-{n:02d}-START", 0),
+                     *(Cell(f"값{n}-{c}", c) for c in range(1, data_cols))])
+    result = split_table_rows(
+        grid=grid, num_cols=data_cols, single_text="X" * 3000, limit=500, count_text=len,
+        table_format="markdown", header_row_count=1, row_serialization=True,
+    )
+
+    assert result.did_split
+    for piece in result.pieces:
+        body, _, summary = piece.partition(ROW_LINES_LABEL)
+        # 표 헤더에 한 번 남고 행 요약 라벨로는 쓰이지 않는다.
+        assert (body.count(_CLAUSE), summary.count(_CLAUSE)) == (1, 0)
+
+
 # ─── rowspan 분할 (결함 회귀 고정) ─────────────────────────────────────────────
 
 def _rowspan_grid(groups=3, per_group=4, payload_size=90):
