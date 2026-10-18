@@ -590,8 +590,9 @@ llm:
 > |---|---|---|
 > | `skip.layout` | `true` | 안내 문구 한 칸짜리 표처럼 값이 하나뿐이거나 데이터 행이 없는 레이아웃 표 |
 > | `skip.self_describing` | `false` | 구체적인 제목(섹션 제목·캡션·표 바로 위 한 줄)이 있고, 데이터 행 5개 이하·열 2~3개이며, 행 라벨을 뺀 값 셀이 문장형인 표. 값에 금액·비율·기간이 있거나 병합 셀·다단 헤더가 있으면 보냅니다 |
+> | `skip.contained_duplicate` | `false` | 같은 문서의 앞선 표 하나에 모든 행(헤더 포함)이 행 단위로 이미 실린 표. 앞 표의 병합 셀에 통째로 전사된 하위 표나 다른 쪽에 다시 실린 표가 해당하며, 셀 값만 같고 행의 짝이 다른 표는 보냅니다. 레코드 경로에서는 같은 레코드 안의 표끼리 비교합니다 |
 >
-> `self_describing` 은 문서유형마다 검색 결과를 확인한 뒤 켭니다. 표를 뺀 문서는 처리 로그에 `표 N개 중 M개를 LLM 전송에서 제외합니다(사유별 개수)` 가 남고, 호출 횟수는 모든 문서에 남습니다. 표준 설정은 청크에 싣지 않는 검색어를 만들지 않도록 `rag.search_terms_limit: 0` 입니다. `include_search_terms: true` 로 검색어를 청크에 실을 때는 이 값도 함께 올립니다.
+> `self_describing` 과 `contained_duplicate` 는 문서유형마다 검색 결과를 확인한 뒤 켭니다. 표를 뺀 문서는 처리 로그에 `표 N개 중 M개를 LLM 전송에서 제외합니다(사유별 개수)` 가 남고, 호출 횟수는 모든 문서에 남습니다. 표준 설정은 청크에 싣지 않는 검색어를 만들지 않도록 `rag.search_terms_limit: 0` 입니다. `include_search_terms: true` 로 검색어를 청크에 실을 때는 이 값도 함께 올립니다.
 >
 > **이름 변경 안내**: 모델 context 한도 키 `max_context_tokens` 는 `model_context_tokens` 로 이름이 바뀌었습니다. 같은 블록의 `max_context_chars`(표 앞뒤 본문 길이)와 혼동되기 때문입니다. 옛 이름(`max_context_tokens`, `max_context`)도 계속 읽으므로 기존 설정은 그대로 동작하며, 한 블록에 둘 다 적으면 새 이름이 우선합니다. 적용 위치는 `precheck` 계열과 `table_text_description` 입니다.
 

@@ -38,13 +38,16 @@ from typing import Any, Callable, Optional
 
 from .table_description import TABLE_RETRIEVAL_LABEL
 from .table_text_context import (
+    SKIP_CONTAINED_DUPLICATE,
     SKIP_LAYOUT,
     SKIP_SELF_DESCRIBING,
     TableTextDescriptionOptions,
     TableTextTarget,
+    is_contained_duplicate,
     is_self_describing,
     log_skipped_tables,
     merge_table_text_description,
+    table_row_texts,
 )
 
 _log = logging.getLogger(__name__)
@@ -139,19 +142,31 @@ def build_text_table_targets(
     return targets
 
 
+def text_table_rows(target: TableTextTarget) -> list[str]:
+    """레코드 경로 표의 `table_row_texts`(중복 판정 입력)."""
+    from genon.preprocessor.processing.chunking import table_blocks as tbk
+
+    grid = tbk.block_grid(target.input_format, target.table_text)
+    return table_row_texts(grid.rows) if grid is not None else []
+
+
 def text_table_skip_reason(
-    target: TableTextTarget, options: TableTextDescriptionOptions
+    target: TableTextTarget, options: TableTextDescriptionOptions,
+    rows: list[str] | None = None, previous: list[list[str]] | None = None,
 ) -> str | None:
     """레코드 경로의 표를 LLM 전송에서 뺄 사유. 판정은 문서 경로와 같다.
 
     레이아웃 판정은 청커의 레코드 경로(`table_blocks.normalize_degenerate`)와 같은 함수를
     쓴다. 앵커는 섹션 제목·캡션과, 청커가 표와 함께 두는 바로 앞 제목 줄(`table_title_line`)이다.
+    중복 판정은 같은 레코드의 앞선 표들(`previous`)과 비교한다.
     """
     from genon.preprocessor.processing.chunking import table_blocks as tbk
 
     kind, text = target.input_format, target.table_text
     if options.skip_layout and tbk.is_layout_block(kind, text):
         return SKIP_LAYOUT
+    if options.skip_contained_duplicate and is_contained_duplicate(rows or [], previous or []):
+        return SKIP_CONTAINED_DUPLICATE
     if not options.skip_self_describing:
         return None
     grid = tbk.block_grid(kind, text)
@@ -367,7 +382,13 @@ class TableTextDescriptionEnricher:
             return list(texts)
         # 삽입 계획(plans)은 그대로 두고 전송 목록만 거른다. 뺀 표는 응답이 없어 설명 블록이
         # 붙지 않으므로 아래 표-위치 짝짓기가 밀리지 않는다.
-        reasons = [text_table_skip_reason(target, options) for target in all_targets]
+        reasons: list[str | None] = []
+        for _index, targets in plans:
+            previous: list[list[str]] = []
+            for target in targets:
+                rows = text_table_rows(target) if options.skip_contained_duplicate else []
+                reasons.append(text_table_skip_reason(target, options, rows, previous))
+                previous.append(rows)
         send = [target for target, reason in zip(all_targets, reasons) if not reason]
         log_skipped_tables(len(all_targets), [reason for reason in reasons if reason])
         if not send:

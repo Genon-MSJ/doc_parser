@@ -120,8 +120,10 @@ class TableTextDescriptionOptions:
     # LLM 전송에서 뺄 표(`table_skip_reason`). 레이아웃 표(값이 하나뿐이거나 데이터 행이 없는 표)는
     # 설명할 내용이 없으므로 기본으로
     # 빼고, 자기서술형 표는 검색 품질 확인이 문서유형마다 필요해 기본으로 끈다.
+    # 앞선 표에 이미 실린 중복 표도 같은 이유로 문서유형에서 켠다.
     skip_layout: bool = True
     skip_self_describing: bool = False
+    skip_contained_duplicate: bool = False
 
     @classmethod
     def from_config(cls, cfg: dict | None) -> "TableTextDescriptionOptions":
@@ -160,6 +162,7 @@ class TableTextDescriptionOptions:
             concurrency=_as_int(cfg.get("concurrency"), 8, 1),
             skip_layout=_as_bool(skip.get("layout"), True),
             skip_self_describing=_as_bool(skip.get("self_describing"), False),
+            skip_contained_duplicate=_as_bool(skip.get("contained_duplicate"), False),
         )
 
     @property
@@ -260,6 +263,7 @@ def _resolve_input_format(document: DoclingDocument, configured: str) -> str:
 # 이미 그 역할을 하는 표는 설명을 받아도 새로 잡히는 질의가 없으므로 LLM 에 보내지 않는다.
 SKIP_LAYOUT = "layout"
 SKIP_SELF_DESCRIBING = "self_describing"
+SKIP_CONTAINED_DUPLICATE = "contained_duplicate"
 
 # 자기서술형 판정 임계. 값 셀이 이미 문장이면 설명이 덧붙일 정보가 없다.
 _SELF_DESC_MAX_DATA_ROWS = 5
@@ -317,6 +321,42 @@ def is_self_describing(
     return not any(_CONDITION_VALUE_RE.search(value) for value in values)
 
 
+# 중복 판정에서 본문이 이보다 짧은 표는 보지 않는다. 숫자 몇 개뿐인 표는 다른 표의 셀에
+# 우연히 들어 있을 수 있다.
+_DUPLICATE_MIN_CHARS = 20
+
+
+def table_row_texts(grid: Any) -> list[str]:
+    """행마다 셀 본문을 공백 없이 이어 붙인 문자열. 병합으로 반복된 이웃 셀은 한 번만 넣고 빈 행은 뺀다."""
+    rows: list[str] = []
+    for row in grid or []:
+        cells: list[str] = []
+        for cell in row:
+            text = "".join(cell_text(cell).split())
+            if text and (not cells or cells[-1] != text):
+                cells.append(text)
+        if cells:
+            rows.append("".join(cells))
+    return rows
+
+
+def is_contained_duplicate(rows: list[str], previous: list[list[str]]) -> bool:
+    """같은 문서의 앞선 표 하나가 이 표의 모든 행(헤더 포함)을 행 단위로 담고 있는가.
+
+    `rows`·`previous` 는 `table_row_texts` 결과다. 이 표의 행마다 셀을 순서대로 이은 문자열이
+    앞선 표의 한 행 안에 있어야 한다. 앞 표의 병합 셀 하나에 하위 표가 통째로 전사된 경우와
+    다른 쪽에 같은 표가 다시 실린 경우가 걸리고, 셀 값만 같고 행의 짝이 다른 표(금액이 뒤바뀐
+    표)는 걸리지 않는다. 같은 내용이 앞 표 청크에 이미 있으므로 이 표의 설명은 검색에 더하는
+    것이 없다.
+    """
+    if sum(map(len, rows)) < _DUPLICATE_MIN_CHARS:
+        return False
+    return any(
+        all(any(row in prev_row for prev_row in prev) for row in rows)
+        for prev in previous
+    )
+
+
 def log_skipped_tables(total: int, reasons: list[str]) -> None:
     """뺀 표가 있을 때만 대상 표 수와 뺀 표 수(사유별)를 남긴다. 표 수는 호출 로그에도 있다."""
     if not reasons:
@@ -341,13 +381,18 @@ def _table_title_line(items: list[DocItem], index: int) -> str:
     return text
 
 
-def _item_skip_reason(item: TableItem, anchors: list[str], options: "TableTextDescriptionOptions") -> str | None:
+def _item_skip_reason(
+    item: TableItem, anchors: list[str], options: "TableTextDescriptionOptions",
+    rows: list[str], previous: list[list[str]],
+) -> str | None:
     data = getattr(item, "data", None)
     grid = getattr(data, "grid", None)
     num_cols = getattr(data, "num_cols", None)
     # 레이아웃 판정은 청커(`smart_chunker`)와 같은 호출이다 — 청커가 평문으로 내는 표만 뺀다.
     if options.skip_layout and degenerate_reason(grid, num_cols):
         return SKIP_LAYOUT
+    if options.skip_contained_duplicate and is_contained_duplicate(rows, previous):
+        return SKIP_CONTAINED_DUPLICATE
     if options.skip_self_describing and is_self_describing(grid, num_cols, anchors):
         return SKIP_SELF_DESCRIBING
     return None
@@ -377,6 +422,8 @@ def collect_table_text_targets(
     targets: list[TableTextTarget] = []
     fmt = _resolve_input_format(document, input_format or options.input_format)
     skipped: list[str] = []
+    # 중복 판정의 비교 대상. 뺀 표도 본문은 청크에 남으므로 모든 표를 넣는다.
+    previous: list[list[str]] = []
     total = 0
     for index, item in enumerate(items):
         if not isinstance(item, TableItem):
@@ -387,9 +434,15 @@ def collect_table_text_targets(
         except Exception:
             caption = ""
         section_header = _section_header(items, index)
-        reason = _item_skip_reason(
-            item, [section_header, caption, _table_title_line(items, index)], options
+        rows = (
+            table_row_texts(getattr(getattr(item, "data", None), "grid", None))
+            if options.skip_contained_duplicate else []
         )
+        reason = _item_skip_reason(
+            item, [section_header, caption, _table_title_line(items, index)], options,
+            rows, previous,
+        )
+        previous.append(rows)
         if reason:
             skipped.append(reason)
             continue
