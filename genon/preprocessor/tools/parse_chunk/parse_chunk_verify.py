@@ -961,9 +961,16 @@ def check_table_edge_warning(output: str) -> list[str]:
     return [] if n else ["표 분할 예산 초과 경고가 없습니다(기대 1건 이상)"]
 
 
+def check_span_table_contained_duplicate(output: str) -> list[str]:
+    """6쪽 하위 표 2개(앞 표의 병합 셀에 전사됨)를 표 설명 LLM 전송에서 뺐는가(#559)."""
+    want = "LLM 전송에서 제외합니다(contained_duplicate 2)"
+    return [] if want in output else [f"중복 표 생략 로그가 없습니다(기대: {want})"]
+
+
 # 실행 로그(stdout+stderr)에 대한 단정. 변환기 경고처럼 청크에 남지 않는 신호를 본다.
 OUTPUT_CHECKS = {
     ("product_slf", "monimo_product_slf_table_edge_sample.md"): check_table_edge_warning,
+    ("product_slf", "monimo_product_slf_span_table_sample.md"): check_span_table_contained_duplicate,
     ("cs_ssf", "monimo_cs_ssf_sample.dtms"): check_no_json_parse_warning,
     ("cs_ssf", "monimo_cs_ssf_layout_table_sample.dtms"): check_no_json_parse_warning,
     ("stock_insight", "monimo_stock_insight_split_sample.txt"): check_row_merge_warning_kept,

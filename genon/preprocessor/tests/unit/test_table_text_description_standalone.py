@@ -492,6 +492,44 @@ def test_document_layout_table_is_not_collected():
     assert [t.table_item.data.num_cols for t in targets] == [3]
 
 
+def _add_table(doc: DoclingDocument, rows: list[list[str]]) -> None:
+    cells = [
+        TableCell(
+            text=value,
+            start_row_offset_idx=r, end_row_offset_idx=r + 1,
+            start_col_offset_idx=c, end_col_offset_idx=c + 1,
+            column_header=r == 0,
+        )
+        for r, row in enumerate(rows) for c, value in enumerate(row)
+    ]
+    doc.add_table(data=TableData(num_rows=len(rows), num_cols=len(rows[0]), table_cells=cells))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("skip, expected", [
+    ({}, ["최초로 보존치료를 받은 경우 ◇ 계약일로부터 1년초과 구분 지급금액 인레이, 온레이 15만원 복합레진 5만원",
+          "15만원", "5만원"]),
+    ({"contained_duplicate": True}, [
+        "최초로 보존치료를 받은 경우 ◇ 계약일로부터 1년초과 구분 지급금액 인레이, 온레이 15만원 복합레진 5만원",
+        "5만원",
+    ]),
+])
+def test_document_table_contained_in_previous_table_is_not_collected(skip, expected):
+    """앞 표의 병합 셀에 통째로 전사된 하위 표는 빼고, 금액만 뒤바뀐 표는 보낸다."""
+    doc = DoclingDocument(name="slf")
+    doc.add_heading(text="원문 6쪽 - 보존치료", level=2)
+    _add_table(doc, [
+        ["보험금", "지급사유"],
+        ["보존치료 보험금", expected[0]],
+    ])
+    _add_table(doc, [["구분", "지급금액"], ["인레이, 온레이", "15만원"], ["복합레진", "5만원"]])
+    _add_table(doc, [["구분", "지급금액"], ["인레이, 온레이", "5만원"], ["복합레진", "15만원"]])
+
+    targets = collect_table_text_targets(doc, _standalone(skip=skip).options)
+
+    assert [t.table_item.data.grid[1][1].text for t in targets] == expected
+
+
 @pytest.mark.unit
 def test_zero_search_terms_limit_keeps_no_terms():
     """search_terms_limit: 0 이면 모델이 검색어를 돌려줘도 하나도 남기지 않는다(문서·레코드 경로)."""
