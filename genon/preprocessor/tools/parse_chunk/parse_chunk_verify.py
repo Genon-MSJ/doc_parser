@@ -763,7 +763,9 @@ def check_span_table_split(chunks: list) -> list[str]:
     colspan 셀이 피복 컬럼마다, 헤더의 긴 병합 셀이 컬럼 라벨마다 다시 쓰여 조각이 수천 자가
     됐다. 셀마다 원문 한 줄의 문구로 청크 안 등장 횟수를 센다. tbody 조항은 표 1회 + 행 요약
     1회, 헤더 병합 셀은 표 헤더 1회까지 허용한다. 조항 한 행만으로 한도를 넘는 조각은 행을
-    자르지 않는 계약이라 길이 판정에서 뺀다.
+    자르지 않는 계약이라 길이 판정에서 뺀다. 짧은 청크 병합이 섹션 제목을 첫 표 조각 앞에
+    붙이는 경우(#540)에는 한도 초과가 제목 길이로 허용되므로, 본문 첫 줄이 HEADER 리프와 같으면
+    그 줄은 길이에서 뺀다.
     """
     limit = 1500
     once = {
@@ -779,8 +781,13 @@ def check_span_table_split(chunks: list) -> list[str]:
             if text.count(phrase) > most:
                 problems.append(f"청크 {idx} 에 {name} 문구가 {text.count(phrase)}회(최대 {most})")
         split = (chunk.get("table_split_total") or -1) > 1
-        if split and len(text) > limit and once["13쪽 tbody 조항"][0] not in text:
-            problems.append(f"표 조각 청크 {idx} 가 {len(text)}자(최대 {limit})")
+        lines = text.split("\n")
+        size = len(text)
+        if (len(lines) > 1 and lines[0].startswith("HEADER:")
+                and lines[0].rsplit(" > ", 1)[-1].strip() == lines[1].strip()):
+            size -= len(lines[1]) + 1
+        if split and size > limit and once["13쪽 tbody 조항"][0] not in text:
+            problems.append(f"표 조각 청크 {idx} 가 {size}자(최대 {limit})")
     return problems
 
 
