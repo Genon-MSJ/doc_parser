@@ -561,8 +561,18 @@ def _once_field_problems(chunks: list, label: str) -> list[str]:
 
 
 def check_product_attrs_once(chunks: list) -> list[str]:
-    """product_slf/ssf — front matter created_at 이 출시일로 1회만 표기된다."""
-    return _once_field_problems(chunks, "출시일")
+    """product_slf/ssf — front matter created_at 이 출시일로 1회만 표기된다.
+
+    문서형 청크의 once 줄은 HEADER 줄 다음에 온다(#545). 앞에 오면 첫 청크만 HEADER 로
+    시작하지 않는다.
+    """
+    problems = _once_field_problems(chunks, "출시일")
+    if problems:
+        return problems
+    lines = (chunks[0].get("text") or "").splitlines()
+    if len(lines) < 2 or not lines[0].startswith("HEADER: ") or not lines[1].startswith("출시일:"):
+        return [f"첫 청크가 'HEADER: ' 다음 줄에 '출시일:' 을 두지 않습니다(선두 2줄: {lines[:2]})"]
+    return []
 
 
 def check_annual_fee_once(chunks: list) -> list[str]:

@@ -237,6 +237,7 @@ custom_fields `body.merge_short` → 청커 설정 `chunking.short_chunk_size` �
 - 한 청크가 여러 섹션에 걸치면 공통 조상을 앞으로 빼고 리프는 **5개까지만** 나열합니다
   (`… 외 N개`). 수십 개를 다 적으면 헤더가 노이즈가 됩니다.
 - **섹션 제목은 이 줄에만 붙고 본문에서 반복되지 않습니다.**
+- 문서 접두가 있으면 `body.repeat` 값은 이 줄 앞에, `body.once` 값은 첫 청크의 이 줄 다음에 붙습니다.
 - `include_chunk_header: false` 로 끄면 순수 본문만 나옵니다(검색 시 섹션 문맥 소실).
   parse-format 경로는 애초에 헤더가 없어 no-op 입니다.
 

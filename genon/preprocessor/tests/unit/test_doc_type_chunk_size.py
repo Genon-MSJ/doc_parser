@@ -63,9 +63,9 @@ _PREFIX_SCAN_LINES = 4
 def _chunk_header(text: str) -> str:
     """청크의 HEADER 라인. 없으면 빈 문자열.
 
-    접두(`chunk_prefix_fields` / `first_chunk_fields`)는 HEADER 앞에 붙는다 - 코드가
-    의도한 순서다(chunking_processor 의 compose_vectors: "접두는 헤더 앞이다 - 문서
-    식별이 섹션 경로보다 앞에 와야 한다"). 접두 줄이 몇 개인지는 doc_type 설정이
+    반복 접두(`chunk_prefix_fields`)는 HEADER 앞, 첫 청크 전용 접두(`first_chunk_fields`)는
+    HEADER 뒤에 붙는다 - 코드가 의도한 순서다(core/chunker.py 의 build_chunk_text: 문서
+    식별은 섹션 경로보다 앞, 속성 값은 뒤). 접두 줄이 몇 개인지는 doc_type 설정이
     정하므로 특정 값을 떼어내는 대신 HEADER 라인을 찾는다 - 설정이 접두 필드를
     늘리거나 줄여도 이 헬퍼가 끌려다니지 않는다.
     """

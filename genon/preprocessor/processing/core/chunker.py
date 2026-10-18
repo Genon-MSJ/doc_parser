@@ -610,10 +610,12 @@ class ChunkerCore:
         return text, drop
 
     def build_chunk_text(self, job, chunk) -> str:
-        """청크 텍스트를 조립한다: 문서 접두어 + 헤딩 경로 + 본문.
+        """청크 텍스트를 조립한다: 반복 접두 + 헤딩 경로 + 첫 청크 전용 접두 + 본문.
 
-        접두는 헤더 앞이다 — 문서 식별(카드명·문의유형)이 섹션 경로보다 앞에 와야
-        청크만 떼어 봤을 때 "무엇에 대한 글인지" 가 먼저 읽힌다.
+        반복 접두는 헤더 앞이다 — 문서 식별(카드명·문의유형)이 섹션 경로보다 앞에 와야
+        청크만 떼어 봤을 때 "무엇에 대한 글인지" 가 먼저 읽힌다. 첫 청크 전용 접두는
+        출시일·분류 같은 속성 값이라 헤더 뒤에 둔다. 앞에 두면 첫 청크만 HEADER 로
+        시작하지 않는다.
 
         행·텍스트 청크는 파서가 만든 본문을 그대로 쓴다. 레코드 식별 값의 접두는 파서가
         element 의 chunk_prefix 로 이미 얹었다.
@@ -627,8 +629,8 @@ class ChunkerCore:
         # 코어가 붙인 접두. 최종 검사가 이 부분을 빼고 본문만 판정한다.
         notes["chunk_prefix"] = (
             notes["prefix_text"]
-            + (notes["first_prefix_text"] if notes["first_prefix_pending"] else "")
-            + headers_text)
+            + headers_text
+            + (notes["first_prefix_text"] if notes["first_prefix_pending"] else ""))
         return notes["chunk_prefix"] + chunk.text
 
     def collect_chunk_variants(self, job, chunk, text) -> None:
