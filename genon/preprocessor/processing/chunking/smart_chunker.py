@@ -1599,8 +1599,10 @@ class SmartChunkerBase(BaseChunker):
           - 양쪽 모두 한도를 넘으면 이웃 청크 본문을 줄 경계에서 잘라 짧지 않을 만큼만 묶음 쪽으로
             옮긴다(_rebalance). 잘린 두 청크는 이웃 청크의 doc_items 를 공유한다(_split_text_to_budget
             과 같은 트레이드오프). 표가 든 청크는 행이 헤더와 떨어지므로 자르지 않는다.
-          - 묶음 끝의 제목-only 청크(다음 섹션 제목)는 묶음째 다음 청크에 들어가지 못하면 제목만
-            다음 청크 앞에 붙인다. 그 때문에 짧은 청크가 새로 남게 되면 떼지 않는다.
+          - 제목-only 청크(다음 섹션 제목)는 앞 청크에 붙이지 않는다. HEADER 에 앞뒤 섹션 경로가 섞이기
+            때문이다. 묶음 끝의 제목은 묶음째 다음 청크에 들어가지 못하면 제목만 다음 청크 앞에 붙이고
+            (한도를 넘어도 붙인다) 남은 본문은 앞 청크에 붙인다. 앞 청크가 없어 짧은 청크가 새로 남게
+            되면 떼지 않는다. 제목만 모인 묶음은 다음 청크가 없을 때만 앞 청크에 붙인다.
           - 표 청크(table_as_chunk)도 한도 안이면 붙일 곳이 된다. 표 청크 자체는 짧아도 병합 대상이 아니다.
           - 이상 청크 검증에서 버려질 청크(merge_guard)는 건너뛴다. 산출에서는 그 다음 청크가 뒤쪽이다.
             합친 결과가 버려질 청크가 되는 병합은 하지 않는다.
@@ -1763,48 +1765,50 @@ class SmartChunkerBase(BaseChunker):
                     out = _absorb(item, out, donor_first=False, keep_text=True)
                 return out
 
-            def _place(donor: DocChunk, nxt: Optional[DocChunk], *,
-                       last_resort: bool) -> tuple[bool, Optional[DocChunk]]:
-                """donor 의 자리를 정한다. (놓았는지, 이어서 놓을 nxt — 함께 소비했으면 None)."""
+            def _place(donor: DocChunk, nxt: Optional[DocChunk]) -> Optional[DocChunk]:
+                """donor 의 자리를 정한다. 이어서 놓을 nxt 를 돌려준다(함께 소비했으면 None)."""
                 if not _still_short(donor):
                     result.insert(buf_at, donor)
-                    return True, nxt
+                    return nxt
                 # 앞 청크는 버려질 청크를 건너뛰고 찾는다(문서 끝 짧은 청크 앞이 불량 청크인 경우)
                 prev_i = next((i for i in range(buf_at - 1, -1, -1) if not _is_guarded(result[i])), None)
+                # 제목만 모인 묶음은 뒤 본문의 제목이다. 앞 청크에 붙이면 HEADER 에 앞뒤 섹션 경로가
+                # 섞이므로, 다음 청크가 있으면 앞 청크를 후보에서 뺀다(한도 안에 들어가지 않으면 아래
+                # 마지막 수단으로 다음 청크에 붙는다).
+                if nxt is not None and _is_heading_only(donor):
+                    prev_i = None
                 if nxt is not None and (cand := _join(donor, nxt, donor_first=True)):
                     result.append(cand)
-                    return True, None
+                    return None
                 if prev_i is not None and (cand := _join(donor, result[prev_i], donor_first=False)):
                     result[prev_i] = cand
-                    return True, nxt
+                    return nxt
                 if nxt is not None and (pieces := _rebalance(donor, nxt, donor_first=True)):
                     result.extend(pieces)
-                    return True, None
+                    return None
                 if prev_i is not None and (pieces := _rebalance(donor, result[prev_i], donor_first=False)):
                     result[prev_i:prev_i + 1] = pieces
-                    return True, nxt
-                if not last_resort:
-                    return False, nxt
+                    return nxt
                 # 한도 안에서는 붙일 곳이 없다 — 짧은 청크를 남기지 않는 것이 우선이므로 한도를 넘겨
                 # 붙인다. 넘는 양은 donor 길이(기준 미만)와 HEADER 경로 증가분으로 묶인다.
                 if nxt is not None and not _is_guarded(
                         cand := _absorb(donor, nxt, donor_first=True, keep_text=True)):
                     result.append(cand)
-                    return True, None
+                    return None
                 if prev_i is not None and not _is_guarded(
                         cand := _absorb(donor, result[prev_i], donor_first=False, keep_text=True)):
                     result[prev_i] = cand
-                    return True, nxt
+                    return nxt
                 result.insert(buf_at, donor)  # 붙이면 버려질 청크가 되거나 이웃이 없다 — 짧은 청크로 남긴다
-                return True, nxt
+                return nxt
 
             def _settle(nxt: Optional[DocChunk]) -> Optional[DocChunk]:
                 """묶음의 자리를 정한다. nxt 를 함께 소비했으면 None, 아니면 nxt 를 돌려준다.
 
                 묶음 끝의 제목-only 청크는 다음 섹션의 제목이다. 묶음째 nxt 에 들어가지 못하면 제목만
-                nxt 앞에 붙여 자기 섹션과 함께 두고, 남은 본문은 따로 자리를 찾는다. 본문이 짧은 채
-                남게 되면 떼지 않는다(짧은 청크를 남기지 않는 것이 우선). 떼지 않아도 짧은 청크가
-                남는다면 제목만은 자기 섹션에 둔다.
+                nxt 앞에 붙여 자기 섹션과 함께 두고(한도 안에 들어가지 않으면 한도를 넘겨 붙인다), 남은
+                본문은 같은 섹션인 앞 청크에서 자리를 찾는다. 앞 청크가 없어 본문이 짧은 채 남게 되면
+                떼지 않는다(짧은 청크를 남기지 않는 것이 우선).
                 """
                 nonlocal buf
                 items, buf = parts[:], None
@@ -1816,13 +1820,19 @@ class SmartChunkerBase(BaseChunker):
                     if cand := _join(_merged(items), nxt, donor_first=True):
                         result.append(cand)
                         return None
-                    if titled := _join(_merged(items[k:]), nxt, donor_first=True):
-                        for donor, target in ((_merged(items[:k]), titled), (_merged(items), nxt)):
-                            placed, rest = _place(donor, target, last_resort=False)
-                            if placed:
-                                return rest
-                        return _place(_merged(items[:k]), titled, last_resort=True)[1]
-                return _place(_merged(items), nxt, last_resort=True)[1]
+                    body, title = _merged(items[:k]), _merged(items[k:])
+                    has_prev = any(not _is_guarded(r) for r in result[:buf_at])
+                    if has_prev or not _still_short(body):
+                        titled = _join(title, nxt, donor_first=True)
+                        if titled is None and not _is_guarded(
+                                over := _absorb(title, nxt, donor_first=True, keep_text=True)):
+                            titled = over
+                        if titled is not None:
+                            # nxt=None 이면 앞 청크(또는 독립 청크)로만 자리를 찾는다. 다음 섹션 쪽으로
+                            # 보내면 HEADER 에 앞뒤 섹션 경로가 다시 섞인다.
+                            _place(body, None)
+                            return titled
+                return _place(_merged(items), nxt)
 
             for chunk in chunks:
                 if _is_mergeable(chunk):
