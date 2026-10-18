@@ -109,6 +109,11 @@ CASES = [
     # 병합 셀(colspan) 표 캡처를 본뜬 합성 샘플(#539). 생성 스크립트는
     # tools/parse_chunk/make_product_slf_span_table_sample.py 다.
     ("product_slf",   MONIMO / "monimo_product_slf_span_table_sample.md", "병합 셀 표 행 분할"),
+    # 표 분할·병합 경계 사례(#550). 생성 스크립트는 tools/parse_chunk/make_product_table_edge_samples.py 다.
+    ("product_slf",   MONIMO / "monimo_product_slf_table_edge_sample.md", "표 경계: 긴 셀·헤더 초과"),
+    ("product_slf",   MONIMO / "monimo_product_slf_table_edge_sample_pages.md",
+     "표 경계: 계층 헤더·쪽 경계·깊은 경로"),
+    ("product_ssf",   MONIMO / "monimo_product_ssf_table_edge_sample.md", "표 경계: HTML 표 대조군·꼬리말"),
     # 캡처한 실물 구조(안내 섹션 → `## 원문 전사` → `## 원문 N쪽`)를 본뜬 합성 샘플(#526).
     ("product_slf",   MONIMO / "monimo_product_slf_sections_sample.md", "markdown.sections(목차 페이지 포함)"),
     ("product_ssf",   MONIMO / "monimo_product_ssf_sections_sample.md", "markdown.sections"),
@@ -808,6 +813,73 @@ def check_term_duplicate_rows(chunks: list) -> list[str]:
     return [] if found == expected else [f"(BIZ_ID, 최종수정일) {expected} 기대, 실제 {found}"]
 
 
+def _letters(text: str) -> str:
+    """글자와 숫자만 남긴다. 렌더가 <br>·엔티티·공백·따옴표를 바꿔도 같은 원문인지 비교할 수 있다."""
+    import html
+    return re.sub(r"[\W_]+", "", html.unescape(text.replace("<br>", "")))
+
+
+def check_table_edge(*, long_cells: bool = False, oversized_page: int | None = None,
+                     expected: tuple[str, ...] = ()):
+    """표 분할·병합 경계 샘플(#550)의 최종 청크 단정. 샘플 생성기는 make_product_table_edge_samples.py 다.
+
+    - 모든 청크의 len(text) 가 chunk_size 이하다. 예외는 ``oversized_page`` 쪽(사례6)뿐이다. 그 표는
+      헤더 셀만으로 한도를 넘어 초과가 의도된 것이므로, 초과 청크가 그 쪽 표 조각인지만 본다.
+      그 경고 로그는 OUTPUT_CHECKS 의 check_table_edge_warning 이 따로 본다.
+    - 본문에 실린 쪽 제목(`원문 N쪽 - `)의 쪽이 HEADER 에 있다. HEADER 가 리프 상한으로 경로를
+      줄였으면(`… 외 N개`) 보지 않는다. 앞 섹션 HEADER 아래 다음 섹션 제목이 섞인 청크를 잡는다.
+    - 쪽번호만 남은 줄(`- 12 -`, `-12-`, 목록 항목이 된 `12 -`)이 없다. 상품명과 쪽번호를 이은
+      꼬리말 줄은 제거 대상이 아니므로 보지 않는다.
+    - ``long_cells`` 가 참이면 생성기의 LONG_CELLS 셀 원문이, 그 쪽 청크들의 같은 열 값을 이어
+      붙인 것(`[앞 조각에서 이어지는 행]` 조각은 앞 값에 잇는다) 가운데 빠짐없이 있다.
+    - ``expected`` 의 문자열이 어느 청크에든 그대로 있다(대조군 출력 불변, 계층 헤더 라벨 유지,
+      리프 상한 경로).
+    """
+    limit = 1500
+    page_line = re.compile(r"^원문 (\d+)쪽 - ", re.M)
+    page_number_only = re.compile(r"^\s*-?\s*\d{1,4}\s*-\s*$", re.M)
+
+    def page_of(chunk: dict) -> str:
+        return " ".join(re.findall(r"원문 (\d+)쪽", (chunk.get("text") or "").split("\n", 1)[0]))
+
+    def _check(chunks: list) -> list[str]:
+        problems: list[str] = []
+        for idx, chunk in enumerate(chunks):
+            text = chunk.get("text") or ""
+            header, _, body = text.partition("\n")
+            if len(text) > limit and page_of(chunk) != str(oversized_page):
+                problems.append(f"청크 {idx} 가 {len(text)}자(최대 {limit})")
+            if "외 " not in header:
+                stray = sorted(set(page_line.findall(body)) - set(re.findall(r"원문 (\d+)쪽", header)))
+                if stray:
+                    problems.append(f"청크 {idx} 본문의 {','.join(stray)}쪽 제목이 HEADER 에 없음")
+            residue = page_number_only.search(body)
+            if residue:
+                problems.append(f"청크 {idx} 에 쪽번호 잔재: {residue.group(0).strip()!r}")
+        if oversized_page is not None and not any(
+                len(c.get("text") or "") > limit and page_of(c) == str(oversized_page) for c in chunks):
+            problems.append(f"{oversized_page}쪽 표가 헤더만으로 한도를 넘는 사례인데 초과 청크가 없음")
+        if long_cells:
+            from make_product_table_edge_samples import LONG_CELLS
+            for page, column, cell in LONG_CELLS:
+                values: list[str] = []
+                for chunk in chunks:
+                    text = chunk.get("text") or ""
+                    if f"{page} - " not in text.split("\n", 1)[0]:
+                        continue
+                    rows = [line[2:-2].split(" | ") for line in text.split("\n") if line.startswith("| ")][2:]
+                    cells = [_letters(row[column]) for row in rows if len(row) > column]
+                    if cells and "[앞 조각에서 이어지는 행]" in text and values:
+                        values[-1] += cells.pop(0)
+                    values.extend(cells)
+                if _letters(cell) not in values:
+                    problems.append(f"{page} {column}열 긴 셀이 조각 연결로 복원되지 않음: {cell[:20]}")
+        text_all = "\n".join(c.get("text") or "" for c in chunks)
+        problems += [f"기대 문자열 없음: {want[:40]!r}" for want in expected if want not in text_all]
+        return problems
+    return _check
+
+
 EXTRA_CHECKS = {
     ("term", "monimo_term_duplicate_rows_sample.xlsx"): check_term_duplicate_rows,
     ("product_slf", "monimo_product_slf_fields_sample.md"): check_valid_period,
@@ -840,6 +912,18 @@ EXTRA_CHECKS = {
     ("cs_sss", "monimo_cs_sss_sample.json"): check_last_mod_dt(0),
     ("cs_hpp", "monimo_cs_hpp_chunksize_sample.json"): check_last_mod_dt(20260825),
     ("monimo_news", "TD00008415_d_5199.html.json"): check_biz_id_from_filename("TD00008415"),
+    ("product_slf", "monimo_product_slf_table_edge_sample.md"):
+        check_table_edge(long_cells=True, oversized_page=7),
+    # 계층 헤더의 하위 라벨(사례4)과 리프 상한으로 줄인 HEADER(사례9)가 남는다.
+    ("product_slf", "monimo_product_slf_table_edge_sample_pages.md"): check_table_edge(expected=(
+        "지급금액 > 1년이내=150만원 | 지급금액 > 1년초과=300만원", "무엇인가요? … 외 ")),
+    # 한도 안에 드는 span 표(사례11)는 단일 직렬화 그대로 나간다.
+    ("product_ssf", "monimo_product_ssf_table_edge_sample.md"): check_table_edge(expected=("\n".join((
+        "| 담보 | 보장 내용 | 보장 내용 | 지급금액 |", "| - | - | - | - |",
+        "| 담보 | 지급사유 | 자기부담금 | 지급금액 |", "| 상해 | 상해 사망·후유장해 | 없음 | 최대 1억원 |",
+        "| 의료비 | 해외 실손의료비 | 1만원 | 최대 3천만원 |",
+        "| 휴대품 | 휴대품 손해(1품목당 20만원) | 1만원 | 최대 100만원 |",
+        "| 지연 | 항공기 4시간 이상 지연 | 없음 | 20만원 |")),)),
 }
 
 
@@ -855,8 +939,15 @@ def check_row_merge_warning_kept(output: str) -> list[str]:
     return [] if n else ["row_merge 조각 경고가 없습니다(기대 1건 이상)"]
 
 
+def check_table_edge_warning(output: str) -> list[str]:
+    """헤더만으로 한도를 넘는 표(#550 사례6)의 의도된 초과가 분할기 경고 로그로 드러나는가."""
+    n = sum(1 for line in output.splitlines() if "[GenosSmartChunker]" in line and "분할 예산" in line)
+    return [] if n else ["표 분할 예산 초과 경고가 없습니다(기대 1건 이상)"]
+
+
 # 실행 로그(stdout+stderr)에 대한 단정. 변환기 경고처럼 청크에 남지 않는 신호를 본다.
 OUTPUT_CHECKS = {
+    ("product_slf", "monimo_product_slf_table_edge_sample.md"): check_table_edge_warning,
     ("cs_ssf", "monimo_cs_ssf_sample.dtms"): check_no_json_parse_warning,
     ("cs_ssf", "monimo_cs_ssf_layout_table_sample.dtms"): check_no_json_parse_warning,
     ("stock_insight", "monimo_stock_insight_split_sample.txt"): check_row_merge_warning_kept,
