@@ -287,10 +287,12 @@ class SplitInfo:
     page_chunk_counts   쪽 번호 → 그 쪽의 청크 수(n_chunk_of_page)
     table_split_totals  표 참조 → 분할 조각 수(table_split_total)
     table_variants      표 표기형태별 변형 텍스트 기록부(off 면 None)
+    max_chars           최종 출력 청크 글자 수 상한(char 모드 chunk_size, 판정하지 않으면 0)
     """
     page_chunk_counts: dict
     table_split_totals: dict
     table_variants: object = None
+    max_chars: int = 0
 
 
 class ChunkerCore:
@@ -497,6 +499,9 @@ class ChunkerCore:
             page_chunk_counts=page_chunk_counts,
             table_split_totals=getattr(chunker, "_table_split_totals", {}),
             table_variants=getattr(chunker, "_table_variants", None),
+            # 토큰 모드의 chunk_size 는 글자 수가 아니므로 char 모드에서만 최종 길이를 잰다.
+            max_chars=chunk_size if chunk_size and chunk_size > 0
+            and getattr(self, "_tokenizer_type", "char") == "char" else 0,
         )
 
     async def compose_vectors(self, document: DoclingDocument, chunks: List[DocChunk], file_path: str, request: Request, converted_pdf_path: Optional[str] = None, **kwargs: dict) -> \
@@ -1411,6 +1416,7 @@ class ChunkerCore:
                 if len(kept) != len(vector_metas):
                     vm.refresh_stats(kept)
                 vector_metas = kept
+            self._warn_over_length(job, vector_metas)
             # 판정 결과는 요청 상태에 남기고 진입점이 성공 응답에 싣는다. 요청 단위 값이라
             # 프로세서 속성에 두지 않는다. 같은 request 로 다시 청킹해도 앞 결과가 남지 않게
             # 걸린 것이 없을 때도 덮어쓴다.
@@ -1420,6 +1426,23 @@ class ChunkerCore:
             return vector_metas
         finally:
             self._finish_chunk_job(job)
+
+    @staticmethod
+    def _warn_over_length(job, vector_metas) -> None:
+        """최종 출력 청크가 chunk_size 를 넘으면 경고 로그를 남긴다. 응답은 바꾸지 않는다.
+
+        분할 뒤의 병합·접두 부착·마스킹·훅이 청크를 다시 늘릴 수 있어, 분할기가 지킨 한도가
+        출력에서도 지켜지는지는 여기서만 확인된다.
+        """
+        limit = getattr(job.notes.get("split"), "max_chars", 0)
+        if not limit:
+            return
+        for position, vector_meta in enumerate(vector_metas or []):
+            text = getattr(vector_meta, "text", None)
+            if isinstance(text, str) and len(text) > limit:
+                _log.warning(
+                    "[chunker] 최종 청크가 chunk_size 를 넘습니다: index=%s n_char=%d limit=%d",
+                    getattr(vector_meta, "i_chunk_on_doc", position), len(text), limit)
 
     def _finish_chunk_job(self, job) -> None:
         """요청 스코프 자원을 정리한다. 두 번 불러도 안전하다."""
