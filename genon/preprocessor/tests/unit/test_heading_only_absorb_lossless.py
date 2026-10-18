@@ -198,8 +198,8 @@ def test_merge_never_creates_a_chunk_the_validation_drops():
     assert "\n".join(c.text for c in result).count("해당 특약은") == 10
 
 
-def test_short_chunk_merges_over_limit_only_as_last_resort():
-    """이웃이 한도에 가깝고 표가 들어 나눌 수 없으면 한도를 넘겨서라도 붙인다(짧은 청크를 남기지 않음).
+def test_short_chunk_never_merges_over_limit():
+    """이웃이 한도에 가깝고 표가 들어 나눌 수 없으면 한도를 넘겨 붙이지 않고 짧은 청크로 남긴다(#547).
     다음 섹션 제목은 각주 묶음 끝이 아니라 자기 섹션 앞에 놓인다(실물: hwpx 표 각주 → '5. 종류별 이혼')."""
     from docling_core.types.doc.document import TableData
     doc = DoclingDocument(name="sample")
@@ -214,7 +214,7 @@ def test_short_chunk_merges_over_limit_only_as_last_resort():
         chunk_prefix_text="", CHUNK_PATH_MAX_LEAVES=5)
     result = chunker._merge_heading_only_chunks([note, title, body])
 
-    assert [c.text for c in result] == [f"{note.text}\n{title.text}\n{body.text}"]
+    assert [c.text for c in result] == [note.text, f"{title.text}\n{body.text}"]
 
 
 def test_trailing_short_skips_dropped_chunk_to_merge_backward():
@@ -257,18 +257,20 @@ def test_heading_only_titles_survive_header_leaf_limit():
 
 # 실물: monimo_product_slf_span_table_sample.md 의 5쪽 → 6쪽 경계. 6쪽 제목 바로 뒤의 표 조각이 한도에
 # 가까워 제목이 다음 청크에 들어가지 못하면, 한도 안에 들어가는 앞(5쪽) 청크 끝에 붙어 HEADER 에 5·6쪽
-# 경로가 함께 실렸다.
+# 경로가 함께 실렸다. 이를 막으려고 한도를 넘겨 표 조각 앞에 붙이자 1500자를 넘었다(#547, 1502자).
 _P5 = "인터넷치아보험 span 표 재현 상품요약서 > 원문 5쪽 - 2. 보험금 지급사유"
 _P6_TITLE = "원문 6쪽 - 피보험자가 보험기간 중 「\"치과치료보장개시일 이후에 치아에 대하여 '치아우식증"
 _P6 = f"인터넷치아보험 span 표 재현 상품요약서 > {_P6_TITLE}"
 
 
-@pytest.mark.parametrize("layout, table_len", [
-    ("title_only", 2060),          # 기본 실행: 제목 단독 청크, 다음 표 조각이 이미 한도 초과
-    ("short_body_then_title", 1364),  # 설명 없는 실행: 짧은 5쪽 청크와 6쪽 제목이 한 묶음, 제목만 보내도 한도 초과
+@pytest.mark.parametrize("layout, table_len, title_left", [
+    ("title_only", 1364, False),             # 현재 샘플: 제목 단독 청크, 제목 줄까지 넣으면 한도 초과
+    ("title_only", 2060, True),              # 다음 표 조각이 이미 한도 초과 — 제목은 단독으로 남는다
+    ("short_body_then_title", 1364, False),  # 설명 없는 실행: 짧은 5쪽 청크와 6쪽 제목이 한 묶음
 ])
-def test_next_section_title_never_joins_previous_section(layout, table_len):
-    """제목은 앞 섹션 청크에 붙지 않고 뒤 본문(표) 청크 앞에 붙는다. 남은 짧은 본문은 같은 섹션인 앞 청크로 간다."""
+def test_next_section_title_never_joins_previous_section(layout, table_len, title_left):
+    """제목은 앞 섹션 청크에 붙지 않고, 한도를 넘겨 표 조각에 붙지도 않는다(#547). 표 조각 HEADER 가 이미
+    렌더하는 제목은 본문에 넣지 않고 붙는다. 남은 짧은 본문은 같은 섹션인 앞 청크로 간다."""
     from docling_core.types.doc.document import TableData
     doc = DoclingDocument(name="sample")
     prev = _text_chunk(doc, "가" * 355, _P5)
@@ -284,5 +286,7 @@ def test_next_section_title_never_joins_previous_section(layout, table_len):
 
     assert [(c.text, c.meta.headings) for c in result] == [
         ("\n".join([prev.text, *(s.text for s in short)]), [_P5]),
-        (f"{_P6_TITLE}\n{table.text}", [_P6]),
+        *([(_P6_TITLE, [_P6])] if title_left else []),
+        (table.text, [_P6]),
     ]
+    assert _P6_TITLE in chunker._header_line(result[-1].meta.headings, True)
