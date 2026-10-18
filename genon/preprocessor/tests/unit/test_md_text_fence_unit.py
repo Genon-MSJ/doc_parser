@@ -201,6 +201,33 @@ def test_rule_lines_dropped_and_block_prefix_escaped():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "body, kept",
+    [
+        ("- 5 -", None),
+        ("- 5 - 보장한도 안내", "- 5 - 보장한도 안내"),
+    ],
+)
+def test_page_number_only_fence_dropped(body: str, kept: str | None):
+    """쪽번호만 담은 펜스는 목록 항목 `5 -` 가 되지 않도록 블록째 제거한다.
+
+    입력은 `monimo_product_slf_span_table_sample.md` 의 표 뒤 쪽번호 구간이다.
+    쪽번호 외 내용이 섞인 펜스는 기존대로 복원한다.
+    """
+    text = f"</table>\n\n```text\n{body}\n```\n\n<!-- source_page: 6 -->\n"
+
+    out, converted = transform(text)
+
+    assert converted == 1
+    assert "```" not in out
+    assert out.startswith("</table>\n") and out.endswith("<!-- source_page: 6 -->\n")
+    if kept is None:
+        assert "5 -" not in out
+    else:
+        assert kept in out
+
+
+@pytest.mark.unit
 def test_spec_defaults_and_apply():
     spec = MarkdownTextFenceSpec.from_config(True, ("product_hpp",))
 
