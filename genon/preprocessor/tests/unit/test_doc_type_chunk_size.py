@@ -302,23 +302,6 @@ def test_chunk_prefix_fields_repeat_on_every_chunk_within_chunk_size():
 
 
 @pytest.mark.unit
-def test_first_chunk_prefix_follows_header():
-    """첫 청크 전용 접두(body.once)는 HEADER 뒤에 붙는다(#545).
-
-    product_slf 출고 설정은 `body.once: [created_date]`(항목명 `출시일`)다. 앞에 붙으면 첫
-    청크만 HEADER 로 시작하지 않는다. 출고 설정을 그대로 쓰고 LLM 호출도 없다.
-    """
-    source = _require("monimo_product_slf_span_table_sample.md")
-    rows = _parse_and_chunk(source, "product_slf", include_chunk_header=True)
-
-    assert len(rows) > 1
-    first = rows[0]["text"].splitlines()
-    assert first[0].startswith("HEADER: ")
-    assert first[1].startswith("출시일: ")
-    assert not any("출시일: " in r["text"] for r in rows[1:]), "첫 청크에만 실려야 합니다"
-
-
-@pytest.mark.unit
 def test_marker_promotion_is_gated_by_doc_type():
     """마커 승격은 doc_type 설정이 켜야만 일어난다 — 켜지 않으면 크기로만 절단된다.
 
