@@ -868,10 +868,10 @@ async def test_edit_chunk_drop_moves_the_once_prefix_to_the_first_survivor():
 
     # 버리기 전에는 0번만, 버린 뒤에는 새 0번만 접두를 갖는다(문서당 1회).
     assert sum("약관문서식별" in v.text for v in base) == 1
-    assert base[0].text.startswith("약관문서식별")
+    assert base[0].text.splitlines()[1] == "약관문서식별"  # HEADER 줄 다음(#545)
     assert len(kept) == len(base) - 1
     assert sum("약관문서식별" in v.text for v in kept) == 1
-    assert kept[0].text.startswith("약관문서식별")
+    assert kept[0].text.splitlines()[1] == "약관문서식별"  # HEADER 줄 다음(#545)
     # 순번·개수는 코어가 다시 맞춘다.
     assert [v.i_chunk_on_doc for v in kept] == list(range(len(kept)))
     assert all(v.n_chunk_of_doc == len(kept) for v in kept)
@@ -926,7 +926,7 @@ async def test_validation_drops_bad_chunks_and_renumbers():
     assert [v.i_chunk_on_doc for v in vectors] == [0, 1]
     assert all(v.n_chunk_of_doc == 2 for v in vectors)
     assert sum(v.n_chunk_of_page for v in vectors if v.i_chunk_on_page == 0) == 2
-    assert vectors[0].text.startswith("약관문서식별")
+    assert vectors[0].text.splitlines()[1] == "약관문서식별"  # HEADER 줄 다음(#545)
     assert sum("약관문서식별" in v.text for v in vectors) == 1
     # 뺀 청크는 진입점이 성공 응답에 싣도록 요청 상태에 남는다. preview 는 출력 본문과 같은
     # 마스킹을 거친 본문이다. 요약 표기는 test_session_summary 가 다룬다.

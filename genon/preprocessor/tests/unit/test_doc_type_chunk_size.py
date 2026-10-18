@@ -63,9 +63,9 @@ _PREFIX_SCAN_LINES = 4
 def _chunk_header(text: str) -> str:
     """청크의 HEADER 라인. 없으면 빈 문자열.
 
-    접두(`chunk_prefix_fields` / `first_chunk_fields`)는 HEADER 앞에 붙는다 - 코드가
-    의도한 순서다(chunking_processor 의 compose_vectors: "접두는 헤더 앞이다 - 문서
-    식별이 섹션 경로보다 앞에 와야 한다"). 접두 줄이 몇 개인지는 doc_type 설정이
+    반복 접두(`chunk_prefix_fields`)는 HEADER 앞, 첫 청크 전용 접두(`first_chunk_fields`)는
+    HEADER 뒤에 붙는다 - 코드가 의도한 순서다(core/chunker.py 의 build_chunk_text: 문서
+    식별은 섹션 경로보다 앞, 속성 값은 뒤). 접두 줄이 몇 개인지는 doc_type 설정이
     정하므로 특정 값을 떼어내는 대신 HEADER 라인을 찾는다 - 설정이 접두 필드를
     늘리거나 줄여도 이 헬퍼가 끌려다니지 않는다.
     """
@@ -299,6 +299,23 @@ def test_chunk_prefix_fields_repeat_on_every_chunk_within_chunk_size():
     effective = _clamp_chunk_size(CHUNK_SIZE)
     over = [(i, len(r["text"])) for i, r in enumerate(rows) if len(r["text"]) > effective]
     assert not over, f"접두 몫 예약 누락 — 유효 상한={effective} 초과 청크: {over[:5]}"
+
+
+@pytest.mark.unit
+def test_first_chunk_prefix_follows_header():
+    """첫 청크 전용 접두(body.once)는 HEADER 뒤에 붙는다(#545).
+
+    product_slf 출고 설정은 `body.once: [created_date]`(항목명 `출시일`)다. 앞에 붙으면 첫
+    청크만 HEADER 로 시작하지 않는다. 출고 설정을 그대로 쓰고 LLM 호출도 없다.
+    """
+    source = _require("monimo_product_slf_span_table_sample.md")
+    rows = _parse_and_chunk(source, "product_slf", include_chunk_header=True)
+
+    assert len(rows) > 1
+    first = rows[0]["text"].splitlines()
+    assert first[0].startswith("HEADER: ")
+    assert first[1].startswith("출시일: ")
+    assert not any("출시일: " in r["text"] for r in rows[1:]), "첫 청크에만 실려야 합니다"
 
 
 @pytest.mark.unit
