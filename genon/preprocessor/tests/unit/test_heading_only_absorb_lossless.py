@@ -253,3 +253,36 @@ def test_heading_only_titles_survive_header_leaf_limit():
 
     assert len(result) == 1
     assert all(t in result[0].text for t in titles)
+
+
+# 실물: monimo_product_slf_span_table_sample.md 의 5쪽 → 6쪽 경계. 6쪽 제목 바로 뒤의 표 조각이 한도에
+# 가까워 제목이 다음 청크에 들어가지 못하면, 한도 안에 들어가는 앞(5쪽) 청크 끝에 붙어 HEADER 에 5·6쪽
+# 경로가 함께 실렸다.
+_P5 = "인터넷치아보험 span 표 재현 상품요약서 > 원문 5쪽 - 2. 보험금 지급사유"
+_P6_TITLE = "원문 6쪽 - 피보험자가 보험기간 중 「\"치과치료보장개시일 이후에 치아에 대하여 '치아우식증"
+_P6 = f"인터넷치아보험 span 표 재현 상품요약서 > {_P6_TITLE}"
+
+
+@pytest.mark.parametrize("layout, table_len", [
+    ("title_only", 2060),          # 기본 실행: 제목 단독 청크, 다음 표 조각이 이미 한도 초과
+    ("short_body_then_title", 1364),  # 설명 없는 실행: 짧은 5쪽 청크와 6쪽 제목이 한 묶음, 제목만 보내도 한도 초과
+])
+def test_next_section_title_never_joins_previous_section(layout, table_len):
+    """제목은 앞 섹션 청크에 붙지 않고 뒤 본문(표) 청크 앞에 붙는다. 남은 짧은 본문은 같은 섹션인 앞 청크로 간다."""
+    from docling_core.types.doc.document import TableData
+    doc = DoclingDocument(name="sample")
+    prev = _text_chunk(doc, "가" * 355, _P5)
+    short = [_text_chunk(doc, "나" * 158, _P5)] if layout == "short_body_then_title" else []
+    title = DocChunk(text=_P6_TITLE, meta=DocMeta(
+        doc_items=[doc.add_heading(text=_P6_TITLE)], headings=[_P6]))
+    table = DocChunk(text="다" * table_len, meta=DocMeta(
+        doc_items=[doc.add_table(data=TableData(num_rows=1, num_cols=1))], headings=[_P6]))
+    chunker = SmartChunkerBase.model_construct(
+        include_chunk_header=True, max_tokens=1500, short_chunk_size=200,
+        chunk_prefix_text="", CHUNK_PATH_MAX_LEAVES=5)
+    result = chunker._merge_heading_only_chunks([prev, *short, title, table])
+
+    assert [(c.text, c.meta.headings) for c in result] == [
+        ("\n".join([prev.text, *(s.text for s in short)]), [_P5]),
+        (f"{_P6_TITLE}\n{table.text}", [_P6]),
+    ]
