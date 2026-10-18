@@ -618,6 +618,7 @@ class SmartChunkerBase(BaseChunker):
             table_item, dl_doc, single,
             max_tokens=max_tokens,
             prefix=sheet_prefix + description_prefix,
+            compact_prefix=sheet_prefix,
             suffix=suffix,
             **kwargs,
         )
@@ -687,6 +688,7 @@ class SmartChunkerBase(BaseChunker):
             table_item, dl_doc, single,
             max_tokens=max_tokens,
             prefix=sheet_prefix + description_prefix,
+            compact_prefix=sheet_prefix,
             **kwargs,
         )
 
@@ -706,12 +708,16 @@ class SmartChunkerBase(BaseChunker):
 
     def _split_table_by_rows(self, table_item: TableItem, dl_doc: DoclingDocument,
                              single: str, *, max_tokens: Optional[int] = None,
-                             prefix: str = "", suffix: str = "", **kwargs) -> list[str]:
+                             prefix: str = "", compact_prefix: Optional[str] = None, suffix: str = "",
+                             **kwargs) -> list[str]:
         """표를 행 경계에서 나눈 청크 텍스트 목록. 예산 안이면 ``single`` 하나만.
 
         두 변종(_full / _prefix_only)이 설명 처리만 다르고 이 아래 흐름은 같았다.
         표 구조 판정과 포맷 선택이 한 곳에만 있어야 같은 표가 분할 여부에 따라 다른
         형식으로 나가는 일을 막을 수 있다.
+
+        ``compact_prefix`` 는 반복 검색 설명을 뺀 접두다. 행 하나로 한도를 넘는 조각에서만
+        ``prefix`` 대신 쓰인다(split_table_rows 의 2단계).
         """
         limit = self.max_tokens if max_tokens is None else max_tokens
         if limit is None or limit <= 0:
@@ -728,6 +734,7 @@ class SmartChunkerBase(BaseChunker):
         if degenerate_reason(table_item.data.grid, shape.num_cols):
             return self._split_text_to_budget(single, limit)
 
+        caption_prefix = self._caption_prefix(table_item, dl_doc)
         result = split_table_rows(
             grid=table_item.data.grid,
             num_cols=shape.num_cols,
@@ -736,10 +743,12 @@ class SmartChunkerBase(BaseChunker):
             count_text=self._count_tokens,
             table_format=self._resolve_table_format(kwargs, shape),
             header_row_count=shape.header_row_count,
-            prefix=prefix + self._caption_prefix(table_item, dl_doc),
+            prefix=prefix + caption_prefix,
             suffix=suffix,
             row_serialization=shape.is_complex and cp.resolve_table_row_serialization(kwargs),
             extra_formats=self._variant_formats(kwargs),
+            compact_prefix=None if compact_prefix is None else compact_prefix + caption_prefix,
+            split_long_cells=True,
         )
         self._record_table_split(table_item, len(result.pieces))
         variants = getattr(self, "_table_variants", None)
@@ -758,8 +767,8 @@ class SmartChunkerBase(BaseChunker):
                 getattr(table_item, "self_ref", ""), len(result.pieces))
         for index in result.oversized_piece_indexes:
             _log.warning(
-                "[GenosSmartChunker] 표의 단일 행 또는 설명이 분할 예산(%d)을 초과해 "
-                "행 구조를 보존한 채 유지합니다: table=%s size=%d",
+                "[GenosSmartChunker] 표 헤더와 접두 등 고정 비용만으로 분할 예산(%d)을 "
+                "넘어 셀을 나눠도 줄지 않으므로 행 구조를 보존한 채 유지합니다: table=%s size=%d",
                 limit, getattr(table_item, "self_ref", ""),
                 self._count_tokens(result.pieces[index]),
             )

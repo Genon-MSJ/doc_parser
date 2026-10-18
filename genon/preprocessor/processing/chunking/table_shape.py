@@ -321,14 +321,44 @@ def serialize_rows(
     """
     lines: list[str] = []
     for row in rows:
-        parts: list[str] = []
-        for column in range(num_cols):
-            cell = cell_at(row, column)
-            value = cell_text(cell)
-            if not value or is_colspan_copy(cell, column):
-                continue
-            label = header_labels[column] if column < len(header_labels) else ""
-            parts.append(f"{label}={value}" if label else value)
+        parts = [f"{label}={value}" if label else value
+                 for label, value in _row_parts(row, header_labels, num_cols)]
         if parts:
             lines.append(" | ".join(parts))
     return lines
+
+
+def _row_parts(
+    row: Sequence[Any], header_labels: Sequence[str], num_cols: int
+) -> list[tuple[str, str]]:
+    """행 요약에 실리는 (라벨, 값) 목록. 값이 있는 시작 컬럼 셀만 고른다."""
+    parts: list[tuple[str, str]] = []
+    for column in range(num_cols):
+        cell = cell_at(row, column)
+        value = cell_text(cell)
+        if not value or is_colspan_copy(cell, column):
+            continue
+        parts.append((header_labels[column] if column < len(header_labels) else "", value))
+    return parts
+
+
+def row_has_label(row: Sequence[Any], header_labels: Sequence[str], num_cols: int) -> bool:
+    """이 행의 요약 줄에 라벨이 붙은 값이 하나라도 있는가.
+
+    라벨이 하나도 없으면 요약 줄은 표 행의 값을 다시 늘어놓은 것일 뿐이다. 요약 문자열의
+    모양(``=`` 포함 여부)으로 가리면 값에 든 ``=`` 를 라벨로 오인하므로, 실제로 출력되는
+    셀과 그 컬럼 라벨로 판정한다.
+    """
+    return any(label for label, _ in _row_parts(row, header_labels, num_cols))
+
+
+def cell_with_text(cell: Any, text: str, column: int) -> _FlatCell:
+    """셀의 구조 속성은 그대로 두고 텍스트만 바꾼 사본. 긴 셀을 나눈 부분 행에 쓴다."""
+    return _FlatCell(
+        text=text,
+        start_col_offset_idx=int(getattr(cell, "start_col_offset_idx", column) or 0),
+        col_span=_span(cell, "col_span"),
+        column_header=bool(getattr(cell, "column_header", False)),
+        row_header=bool(getattr(cell, "row_header", False)),
+        row_section=bool(getattr(cell, "row_section", False)),
+    )

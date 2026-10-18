@@ -768,14 +768,13 @@ def check_sections_selected(product: str, first_page: str):
 
 
 def check_span_table_split(chunks: list) -> list[str]:
-    """병합 셀 표의 분할 조각에 같은 병합 셀이 반복되지 않고 조각이 chunk_size 안에 드는가(#539).
+    """병합 셀 표의 분할 조각에 같은 병합 셀이 반복되지 않고 모든 청크가 chunk_size 안에 드는가(#539, #548).
 
     colspan 셀이 피복 컬럼마다, 헤더의 긴 병합 셀이 컬럼 라벨마다 다시 쓰여 조각이 수천 자가
     됐다. 셀마다 원문 한 줄의 문구로 청크 안 등장 횟수를 센다. tbody 조항은 표 1회 + 행 요약
-    1회, 헤더 병합 셀은 표 헤더 1회까지 허용한다. 조항 한 행만으로 한도를 넘는 조각은 행을
-    자르지 않는 계약이라 길이 판정에서 뺀다. 짧은 청크 병합이 섹션 제목을 첫 표 조각 앞에
-    붙이는 경우(#540)에는 한도 초과가 제목 길이로 허용되므로, 본문 첫 줄이 HEADER 리프와 같으면
-    그 줄은 길이에서 뺀다.
+    1회, 헤더 병합 셀은 표 헤더 1회까지 허용한다. 길이는 예외 없이 최종 text 로 잰다 — 조항
+    한 행만으로 한도를 넘던 조각은 행 요약·검색 설명을 덜거나 셀을 나눠 한도 안에 든다.
+    13쪽 tbody 조항은 조각을 이어 붙이면 원문이 빠짐없이 복원되어야 한다.
     """
     limit = 1500
     once = {
@@ -790,14 +789,23 @@ def check_span_table_split(chunks: list) -> list[str]:
         for name, (phrase, most) in once.items():
             if text.count(phrase) > most:
                 problems.append(f"청크 {idx} 에 {name} 문구가 {text.count(phrase)}회(최대 {most})")
-        split = (chunk.get("table_split_total") or -1) > 1
-        lines = text.split("\n")
-        size = len(text)
-        if (len(lines) > 1 and lines[0].startswith("HEADER:")
-                and lines[0].rsplit(" > ", 1)[-1].strip() == lines[1].strip()):
-            size -= len(lines[1]) + 1
-        if split and size > limit and once["13쪽 tbody 조항"][0] not in text:
-            problems.append(f"표 조각 청크 {idx} 가 {size}자(최대 {limit})")
+        if len(text) > limit:
+            problems.append(f"청크 {idx} 가 {len(text)}자(최대 {limit})")
+    # 13쪽 tbody 조항 원문(셀 값)이 조각들의 첫 열 값을 이어 붙인 것 가운데 있어야 한다. 텍스트
+    # 정제가 따옴표·공백을 바꾸므로 글자와 숫자만 비교한다.
+    source = (MONIMO / "monimo_product_slf_span_table_sample.md").read_text(encoding="utf-8")
+    clause = re.search(r'<td colspan="4">(㈜ 1\. 보험료 납입기간 중 주계약의 보험료 납입면제 사유가 '
+                       r'발생하였을 경우에는.*?)</td>', source, re.S).group(1)
+    cells: list[str] = []
+    for chunk in chunks:
+        text = chunk.get("text") or ""
+        rows = [line for line in text.split("\n") if line.startswith("| ")][2:]
+        values = [re.sub(r"[\W_]+", "", row[2:].split(" | ")[0]) for row in rows]
+        if values and "[앞 조각에서 이어지는 행]" in text and cells:
+            cells[-1] += values.pop(0)
+        cells.extend(values)
+    if re.sub(r"[\W_]+", "", clause.replace("<br>", "")) not in cells:
+        problems.append("13쪽 tbody 조항이 조각 연결로 복원되지 않음")
     return problems
 
 
