@@ -17,6 +17,7 @@ from genon.preprocessor.processing.chunking.table_shape import (
     cell_at as _cell_at,
     cell_text as _cell_text,
     flatten_header_rows,
+    is_colspan_copy,
     leading_header_row_count,
     normalize_row_spans,
     serialize_rows,
@@ -51,10 +52,11 @@ def _escape_markdown_cell(value: str) -> str:
 
 
 def _render_markdown_row(row: Sequence[Any], num_cols: int) -> str:
-    cells = [
-        _escape_markdown_cell(_cell_text(_cell_at(row, column)))
-        for column in range(num_cols)
-    ]
+    # colspan 셀은 시작 컬럼에만 쓰고 피복 컬럼은 비운다. 열 수는 헤더와 맞아야 한다.
+    cells: list[str] = []
+    for column in range(num_cols):
+        cell = _cell_at(row, column)
+        cells.append("" if is_colspan_copy(cell, column) else _escape_markdown_cell(_cell_text(cell)))
     return "| " + " | ".join(cells) + " |"
 
 
@@ -186,9 +188,14 @@ def split_table_rows(
         return TableSplitResult([single_text], False, "no-markdown-header")
 
     rendered_rows = [renderer.render_row(row, num_cols) for row in data_rows]
-    # 행 문장은 표기형태와 무관하다. 한 번 만들어 모든 형식이 공유한다.
+    # 행 문장은 표기형태와 무관하다. 한 번 만들어 모든 형식이 공유한다. 하위 헤더 없는
+    # 병합 헤더 셀은 표 헤더에 한 번 남으므로 행 요약 라벨에서는 뺀다.
     row_lines = (
-        serialize_rows(data_rows, header_labels, num_cols)
+        serialize_rows(
+            data_rows,
+            flatten_header_rows(grid, header_row_count, num_cols, keep_merged_leaf=False),
+            num_cols,
+        )
         if row_serialization else []
     )
 

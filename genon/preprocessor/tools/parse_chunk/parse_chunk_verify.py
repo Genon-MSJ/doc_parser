@@ -106,6 +106,9 @@ CASES = [
     ("product_slf",   MONIMO / "monimo_product_slf_fields_sample.md",
      "코드값·비표준 날짜·브랜드 분리 front matter"),
     ("product_ssf",   MONIMO / "monimo_product_ssf_sample.md",         "llm + markdown front matter"),
+    # 병합 셀(colspan) 표 캡처를 본뜬 합성 샘플(#539). 생성 스크립트는
+    # tools/parse_chunk/make_product_slf_span_table_sample.py 다.
+    ("product_slf",   MONIMO / "monimo_product_slf_span_table_sample.md", "병합 셀 표 행 분할"),
     # 캡처한 실물 구조(안내 섹션 → `## 원문 전사` → `## 원문 N쪽`)를 본뜬 합성 샘플(#526).
     ("product_slf",   MONIMO / "monimo_product_slf_sections_sample.md", "markdown.sections(목차 페이지 포함)"),
     ("product_ssf",   MONIMO / "monimo_product_ssf_sections_sample.md", "markdown.sections"),
@@ -754,6 +757,40 @@ def check_sections_selected(product: str, first_page: str):
     return _check
 
 
+def check_span_table_split(chunks: list) -> list[str]:
+    """병합 셀 표의 분할 조각에 같은 병합 셀이 반복되지 않고 조각이 chunk_size 안에 드는가(#539).
+
+    colspan 셀이 피복 컬럼마다, 헤더의 긴 병합 셀이 컬럼 라벨마다 다시 쓰여 조각이 수천 자가
+    됐다. 셀마다 원문 한 줄의 문구로 청크 안 등장 횟수를 센다. tbody 조항은 표 1회 + 행 요약
+    1회, 헤더 병합 셀은 표 헤더 1회까지 허용한다. 조항 한 행만으로 한도를 넘는 조각은 행을
+    자르지 않는 계약이라 길이 판정에서 뺀다. 짧은 청크 병합이 섹션 제목을 첫 표 조각 앞에
+    붙이는 경우(#540)에는 한도 초과가 제목 길이로 허용되므로, 본문 첫 줄이 HEADER 리프와 같으면
+    그 줄은 길이에서 뺀다.
+    """
+    limit = 1500
+    once = {
+        "11쪽 tbody 조항": ("보험료 납입 면제 사유가 발생하였을 경우(단, 주계약이 유", 2),
+        "13쪽 thead 조항": ("2. 특약의 피보험자와 주계약의 피보험자가 다를 경우에는", 1),
+        "13쪽 tbody 조항": ("다만, 이 특약의 피보험자와 주계약의 피보험자가 다를", 2),
+        "6쪽 thead 병합 셀": ("인레이, 온레이 15만원", 1),
+    }
+    problems: list[str] = []
+    for idx, chunk in enumerate(chunks):
+        text = chunk.get("text") or ""
+        for name, (phrase, most) in once.items():
+            if text.count(phrase) > most:
+                problems.append(f"청크 {idx} 에 {name} 문구가 {text.count(phrase)}회(최대 {most})")
+        split = (chunk.get("table_split_total") or -1) > 1
+        lines = text.split("\n")
+        size = len(text)
+        if (len(lines) > 1 and lines[0].startswith("HEADER:")
+                and lines[0].rsplit(" > ", 1)[-1].strip() == lines[1].strip()):
+            size -= len(lines[1]) + 1
+        if split and size > limit and once["13쪽 tbody 조항"][0] not in text:
+            problems.append(f"표 조각 청크 {idx} 가 {size}자(최대 {limit})")
+    return problems
+
+
 def check_term_duplicate_rows(chunks: list) -> list[str]:
     """완전 중복 행(SLF_0001 재전송)은 한 번만, 최종수정일만 다른 대조군(HPP_0001)은 둘 다 남는다(#412)."""
     found = sorted((str(c.get("BIZ_ID")), str(c.get("SRC_LAST_MOD_DT"))) for c in chunks)
@@ -767,6 +804,7 @@ EXTRA_CHECKS = {
     ("product_slf", "monimo_product_slf_sample.md"):
         lambda chunks: check_front_matter(chunks) + check_product_attrs_once(chunks),
     ("product_ssf", "monimo_product_ssf_sample.md"): check_product_attrs_once,
+    ("product_slf", "monimo_product_slf_span_table_sample.md"): check_span_table_split,
     ("product_slf", "monimo_product_slf_sections_sample.md"):
         check_sections_selected("無비추미암보험", "원문 2쪽 - 상품요약서"),
     ("product_ssf", "monimo_product_ssf_sections_sample.md"):
