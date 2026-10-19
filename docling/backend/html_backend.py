@@ -286,6 +286,16 @@ class AnnotatedText(BaseModel):
     source_tag_id: Optional[str] = None
 
 
+class _ListTableMarker(AnnotatedText):
+    """<li> 텍스트 추출(ignore_list)에서 표로 따로 내보낼 <table> 의 자리를 표시한다.
+
+    _handle_list 가 이 표식으로 텍스트를 나눠 표 앞 텍스트, 표, 표 뒤 텍스트를 원문 순서대로
+    내보낸다. simplify_text_elements 는 원소를 새로 만들어 이 표식을 없애므로 그 전에 나눈다.
+    """
+
+    table: Any = None
+
+
 class AnnotatedTextList(list):
     def to_single_text_element(self) -> AnnotatedText:
         current_h = None
@@ -1856,9 +1866,12 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
             return AnnotatedTextList()
         if self._is_checkbox_label_tag(tag):
             return AnnotatedTextList()
-        # ignore_list 는 <li> 의 직접 텍스트를 모을 때만 켠다. 하위 목록과 마찬가지로 <li> 안의
-        # <table> 도 _handle_list 가 표로 따로 내보내므로 목록 항목 텍스트에 섞지 않는다.
-        if not ignore_list or (tag.name not in ["ul", "ol", "table"]):
+        # ignore_list 는 <li> 의 직접 텍스트를 모을 때만 켠다. <li> 안의 <table> 은 _handle_list 가
+        # 표로 따로 내보내므로 텍스트 대신 그 자리에 표식을 남긴다. 행으로 셀 수 없는 표는 표로
+        # 파싱할 수 없으므로(parse_table_data) 이전과 같이 텍스트로 둔다.
+        if ignore_list and tag.name == "table" and self.get_html_table_row_col(tag)[0] > 0:
+            return AnnotatedTextList([_ListTableMarker(text="", table=tag)])
+        if not ignore_list or (tag.name not in ["ul", "ol"]):
             for child in tag:
                 if isinstance(child, Tag) and child.name in _FORMAT_TAG_MAP:
                     with self._use_format([child.name]):
@@ -2181,6 +2194,9 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
             # sub-list items should be indented under main list items, but temporarily
             # addressing invalid HTML (docling-core/issues/357)
             if li.name in {"ul", "ol", "table"}:
+                # 행으로 셀 수 없는 표는 표로 파싱할 수 없으므로(parse_table_data) 이전과 같이 건너뛴다.
+                if li.name == "table" and self.get_html_table_row_col(li)[0] == 0:
+                    continue
                 self._handle_block(li, doc)
 
             else:
@@ -2194,7 +2210,17 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                 parts = self._extract_text_and_hyperlink_recursively(
                     li, ignore_list=True, find_parent_annotation=True
                 )
-                min_parts = parts.simplify_text_elements()
+                # <li> 안 표의 표식에서 나눈다. 항목 텍스트는 첫 표 앞까지이고, 표와 그 뒤 텍스트는
+                # 항목 아래에 원문 순서대로 내보낸다(_emit_list_item_tables).
+                tables_in_li: list[Tag] = []
+                segments: list[AnnotatedTextList] = [AnnotatedTextList()]
+                for part in parts:
+                    if isinstance(part, _ListTableMarker):
+                        tables_in_li.append(part.table)
+                        segments.append(AnnotatedTextList())
+                    else:
+                        segments[-1].append(part)
+                min_parts = segments[0].simplify_text_elements()
                 li_text = re.sub(
                     r"\s+|\n+", " ", "".join([el.text for el in min_parts])
                 ).strip()
@@ -2213,7 +2239,7 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                 ]
 
                 # 3) add the list item
-                if li_text or inputs_in_li or custom_checkboxes_in_li:
+                if li_text or inputs_in_li or custom_checkboxes_in_li or tables_in_li:
                     if len(min_parts) > 1:
                         li_prov = self._make_text_prov(text=li_text, tag=li)
                         # create an empty list element in order to hook the inline group onto that one
@@ -2271,6 +2297,7 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                         for checkbox_tag in custom_checkboxes_in_li:
                             if isinstance(checkbox_tag, Tag):
                                 self._emit_custom_checkbox(checkbox_tag, doc)
+                        self._emit_list_item_tables(li, tables_in_li, segments[1:], doc)
 
                         # 4) recurse into any nested lists, attaching them to this <li> item
                         for sublist in li({"ul", "ol"}, recursive=False):
@@ -2301,7 +2328,7 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                             prov=prov,
                         )
 
-                        if inputs_in_li or custom_checkboxes_in_li:
+                        if inputs_in_li or custom_checkboxes_in_li or tables_in_li:
                             self.level += 1
                             for input_tag in inputs_in_li:
                                 if isinstance(input_tag, Tag):
@@ -2309,6 +2336,9 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                             for checkbox_tag in custom_checkboxes_in_li:
                                 if isinstance(checkbox_tag, Tag):
                                     self._emit_custom_checkbox(checkbox_tag, doc)
+                            self._emit_list_item_tables(
+                                li, tables_in_li, segments[1:], doc
+                            )
                             self.level -= 1
 
                         # 4) recurse into any nested lists, attaching them to this <li> item
@@ -2335,6 +2365,7 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                         for checkbox_tag in custom_checkboxes_in_li:
                             if isinstance(checkbox_tag, Tag):
                                 self._emit_custom_checkbox(checkbox_tag, doc)
+                        self._emit_list_item_tables(li, tables_in_li, segments[1:], doc)
                         for sublist in li({"ul", "ol"}, recursive=False):
                             if isinstance(sublist, Tag):
                                 self._handle_block(sublist, doc)
@@ -2345,20 +2376,66 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                         if isinstance(sublist, Tag):
                             self._handle_block(sublist, doc)
 
-                # <li> 안의 표는 목록 항목 텍스트에서 빠졌으므로(ignore_list) 여기서 표로 내보낸다.
-                # 하위 목록이나 다른 표 안의 표는 그쪽 처리가 맡는다.
-                for table_tag in li.find_all("table"):
-                    if table_tag.find_parent({"li", "ul", "ol", "table"}) is li:
-                        self._handle_block(table_tag, doc)
-
                 # 5) extract any images under this <li>
+                # 표로 내보낸 <li> 안 표의 이미지는 표 처리가 맡으므로 건너뛴다.
+                table_ids = {id(table_tag) for table_tag in tables_in_li}
                 for img_tag in li("img"):
                     if isinstance(img_tag, Tag):
+                        if any(id(p) in table_ids for p in img_tag.parents):
+                            continue
                         self._emit_image(img_tag, doc)
 
         self.parents[self.level + 1] = None
         self.level -= 1
         return list_group.get_ref()
+
+    def _emit_list_item_tables(
+        self,
+        li: Tag,
+        tables: list[Tag],
+        tails: list[AnnotatedTextList],
+        doc: DoclingDocument,
+    ) -> None:
+        """<li> 안의 표와 각 표 뒤 텍스트를 원문 순서대로 현재 목록 항목 아래에 내보낸다.
+
+        호출 시점의 현재 parent(self.parents[self.level])는 그 <li> 의 ListItem 이다.
+        tails[i] 는 tables[i] 뒤부터 다음 표 앞까지의 텍스트다.
+        """
+        for table_tag, tail in zip(tables, tails):
+            self._handle_block(table_tag, doc)
+            min_parts = tail.simplify_text_elements()
+            if not re.sub(r"\s+", "", "".join(el.text for el in min_parts)):
+                continue
+            with self._use_inline_group(min_parts, doc):
+                for annotated_text, source_tag_ids in (
+                    self._compact_adjacent_single_char_parts(min_parts)
+                ):
+                    text = re.sub(r"\s+|\n+", " ", annotated_text.text).strip()
+                    if not text:
+                        continue
+                    text = HTMLDocumentBackend._clean_unicode(text)
+                    prov = self._make_text_prov_for_source_tag_ids(
+                        text=text, tag=li, source_tag_ids=source_tag_ids
+                    )
+                    if annotated_text.code:
+                        doc.add_code(
+                            parent=self.parents[self.level],
+                            text=text,
+                            content_layer=self.content_layer,
+                            formatting=annotated_text.formatting,
+                            hyperlink=annotated_text.hyperlink,
+                            prov=prov,
+                        )
+                    else:
+                        doc.add_text(
+                            parent=self.parents[self.level],
+                            label=DocItemLabel.TEXT,
+                            text=text,
+                            content_layer=self.content_layer,
+                            formatting=annotated_text.formatting,
+                            hyperlink=annotated_text.hyperlink,
+                            prov=prov,
+                        )
 
     @staticmethod
     def get_html_table_row_col(tag: Tag) -> tuple[int, int]:

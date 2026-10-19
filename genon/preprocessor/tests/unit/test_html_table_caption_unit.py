@@ -162,6 +162,95 @@ def test_table_inside_list_is_kept_as_table(tmp_path, body, cell):
     assert not any(cell in t.text for t in doc.texts)
 
 
+# 실물 발췌: 서울 구로구청 생활민원 안내(https://guro.go.kr/www/contents.do?key=1963, 검증 문서군 v7
+# d11) 국민기초생활보장 항목의 <li>. 표 행은 머리행과 첫 행만 남겼고 닫는 태그 오기(</td>)는 원문 그대로다.
+_GURO_TABLE_IN_LI = """<ul class="bu">
+<li>가구규모별·급여종류별 소득인정액 기준(2025.01.현재)(단위:원)
+                    <table class="table responsive">
+                        <caption>가구규모별·급여종류별 소득인정액 기준 - 가구규모, 1인, 2인, 3인, 4인, 5인, 6인, 7인가구 순으로 정보 제공</caption>
+						<thead>
+						  <tr>
+							<th scope="col">가구규모</th>
+							<th scope="col">1인가구</th>
+							<th scope="col">2인가구</th>
+						  </tr></thead>
+						<tbody class="text_center">
+						  <tr>
+							<th scope="row">생계급여수급자<br>(기준중위소득 32%)</td>
+							<td>       765,444 </td>
+							<td>     1,258,451 </td>
+						  </tr>
+						</tbody>
+					</table>
+					<p>※ 생계급여 수급자 선정기준인 기준 중위소득 32%는 동시에 생계급여 지급기준에 해당</p>
+					<p>※ 8인 이상 가구의 급여별 선정기준 : 1인 증가시마다 295,559원씩 증가(8인가구 생계급여 : 3,171,856원)</p>
+                </li>
+</ul>"""
+
+
+@pytest.mark.unit
+def test_text_after_table_in_li_stays_after_table(tmp_path):
+    """<li> 안 표 뒤 문장이 표 앞 항목 텍스트로 옮겨지지 않고 표는 그 항목 아래에 붙는다(#567)."""
+    doc = _convert(tmp_path, _GURO_TABLE_IN_LI)
+
+    order = [getattr(item, "text", "") or item.label for item, _ in doc.iterate_items()]
+    table_at = order.index("table")
+    after_at = next(i for i, t in enumerate(order) if t.startswith("※ 생계급여"))
+    item = next(t for t in doc.texts if t.text.startswith("가구규모별"))
+    assert table_at < after_at
+    assert "※" not in item.text
+    assert doc.tables[0].parent.cref == item.self_ref
+
+
+# 생성 데이터: 실물(서울시설공단 개인정보처리방침, v7 d07)의 목록 안 표 형식을 따랐다. 표만 든 <li> 와
+# 셀 안 이미지, <ol start> 는 실물 사례가 없어 넣은 것이다.
+_GENERATED_TABLE_ONLY_ITEM = """<ol start="3">
+<li class="ssblet"><table class="data margin_t10" summary="" width="100%">
+<caption>개인정보 영향평가 수행결과를 개인정보파일명, 영향평가수행연도, 이행여부로 나누어 정리한 표</caption>
+<thead><tr><th scope="col">개인정보파일명</th><th scope="col">영향평가수행연도</th><th scope="col">이행여부</th></tr></thead>
+<tbody><tr><td>주차료 미납과태료 관리</td><td>2015</td><td><img src="/images/common/icon_check.png" alt="이행"></td></tr></tbody>
+</table></li>
+<li class="ssblet">공단은 영향평가 결과에 따른 개선사항을 이행하고 있습니다.</li>
+</ol>"""
+
+
+@pytest.mark.unit
+def test_table_only_li_keeps_list_item_and_number(tmp_path):
+    """표만 든 <li> 도 번호 붙은 항목으로 남고, 표가 번호 계산과 셀 이미지 수에 끼지 않는다(#567)."""
+    doc = _convert(tmp_path, _GENERATED_TABLE_ONLY_ITEM)
+
+    items = [t for t in doc.texts if t.label == "list_item"]
+    assert [t.marker for t in items] == ["3.", "4."]
+    assert doc.tables[0].parent.cref == items[0].self_ref
+    assert len(doc.pictures) == 1
+
+
+# 생성 데이터: 실물(서울시설공단 개인정보처리방침, v7 d07) 형식을 따랐다. 행이 모두 rowspan>1 <th> 인
+# 표는 행 수가 0 으로 계산되어 표 파서(parse_table_data)가 IndexError 를 낸다. 실물 사례는 없다.
+_ROWSPAN_ONLY = (
+    '<table class="data"><tr><th rowspan="2" scope="col">개인정보파일명'
+    '<img src="/images/common/icon_file.png" alt="파일"></th></tr></table>'
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body, text, pictures", [
+    (f'<ul><li class="ssblet">공단은 다음 개인정보파일에 대해 영향평가를 수행하였습니다.{_ROWSPAN_ONLY}</li></ul>',
+     "개인정보파일명", 1),
+    (f'<ul><li class="ssblet">공단은 다음 개인정보파일에 대해 영향평가를 수행하였습니다.</li>{_ROWSPAN_ONLY}</ul>',
+     "영향평가를 수행하였습니다", 0),
+], ids=["table_in_li", "ul_direct_table"])
+def test_list_table_without_countable_rows_does_not_fail(tmp_path, body, text, pictures):
+    """목록 안에서 행으로 셀 수 없는 표는 표로 만들지 않아 문서 변환이 실패하지 않는다(#567).
+
+    <li> 안 표는 이전처럼 항목 텍스트로, <ul> 직계 표는 이전처럼 건너뛴다.
+    """
+    doc = _convert(tmp_path, body)
+
+    assert (len(doc.tables), len(doc.pictures)) == (0, pictures)
+    assert text in doc.export_to_markdown()
+
+
 # 실물 발췌: 검증 문서군 v5 web13(내부 샘플 sample_11.html, 증권사 리포트를 변환한 HTML) 첫 표.
 # 자기 행 없는 <table> 이 표 하나를 감싸고 있다. 행은 앞 4행과 출처 행만 남겼다.
 _REPORT_WRAPPED_TABLE = (
