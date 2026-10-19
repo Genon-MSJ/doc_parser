@@ -294,6 +294,8 @@ def _resolve_input_format(document: DoclingDocument, configured: str) -> str:
 SKIP_LAYOUT = "layout"
 SKIP_SELF_DESCRIBING = "self_describing"
 SKIP_CONTAINED_DUPLICATE = "contained_duplicate"
+# 다른 표의 셀 안에 든 표. 청커는 그 내용을 바깥 표 셀 텍스트로만 싣고 이 표의 설명은 싣지 않는다.
+SKIP_NESTED = "nested"
 
 # 자기서술형 판정 임계. 값 셀이 이미 문장이면 설명이 덧붙일 정보가 없다.
 _SELF_DESC_MAX_DATA_ROWS = 5
@@ -411,6 +413,17 @@ def _table_title_line(items: list[DocItem], index: int) -> str:
     return text
 
 
+def _inside_table(item: DocItem, document: DoclingDocument) -> bool:
+    """parent 체인에 표가 있는지(다른 표의 셀 안에 든 표인지) 본다."""
+    parent = getattr(item, "parent", None)
+    while parent is not None:
+        node = parent.resolve(document)
+        if isinstance(node, TableItem):
+            return True
+        parent = getattr(node, "parent", None)
+    return False
+
+
 def _item_skip_reason(
     item: TableItem, anchors: list[str], options: "TableTextDescriptionOptions",
     rows: list[str], previous: list[list[str]],
@@ -468,10 +481,14 @@ def collect_table_text_targets(
             table_row_texts(getattr(getattr(item, "data", None), "grid", None))
             if options.skip_contained_duplicate else []
         )
-        reason = _item_skip_reason(
-            item, [section_header, caption, _table_title_line(items, index)], options,
-            rows, previous,
-        )
+        # 중첩 표는 레이아웃 표와 같이 청커가 자체 블록으로 내지 않는 표라 skip_layout 으로 함께 뺀다.
+        if options.skip_layout and _inside_table(item, document):
+            reason = SKIP_NESTED
+        else:
+            reason = _item_skip_reason(
+                item, [section_header, caption, _table_title_line(items, index)], options,
+                rows, previous,
+            )
         previous.append(rows)
         if reason:
             skipped.append(reason)

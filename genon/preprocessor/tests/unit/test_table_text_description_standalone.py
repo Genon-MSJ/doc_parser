@@ -492,6 +492,61 @@ def test_document_layout_table_is_not_collected():
     assert [t.table_item.data.num_cols for t in targets] == [3]
 
 
+# 실물 발췌: 검증 문서군 web15(sample_06.html) 암수술특약 표. 지급금액 셀 안에 표가 들어 있다.
+_NESTED_TABLE_HTML = """<table border="1" style="width: 100%; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="width: 15%; background-color: #4A7EBB; color: white;">구분</th>
+<th style="width: 50%; background-color: #4A7EBB; color: white;">지급사유</th>
+<th style="width: 35%; background-color: #4A7EBB; color: white;">지급금액</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td rowspan="2" style="background-color: #B4D7F7;">암수술<br/>급여금</td>
+<td rowspan="2" style="background-color: #B4D7F7;">
+                      특약보험기간 중 피보험자가 보장개시일(암의 경우 암보장개시일) 이후에 「암, 대장점막내암 또는 비침습방광암」, 기타피부암, 갑상선암, 제자리암 또는 경계성종양으로 진단확정
+                      되고, 특약보험기간 중 그 「암, 대장점막내암 또는 비침습방광암」, 기타피부암, 갑상선암, 제자리암 또는 경계성종양의 직접적인 치료를 목적으로 수술을 받았을 때
+                  </td>
+<td style="background-color: #E8E8E8;"><b>【수술 1회당】</b></td>
+</tr>
+<tr>
+<td style="background-color: #B4D7F7;">
+<table border="0" style="width: 100%; border-collapse: collapse;">
+<tr>
+<td style="border-right: 1px solid #999;">암,<br/>대장점막내암<br/>또는<br/>비침습방광암</td>
+<td>100만원<br/>(다만, 계약일부터 1년 미만에 지급사유가 발생한 경우 상기 지급금액의 50%를 지급함)</td>
+</tr>
+<tr>
+<td style="border-right: 1px solid #999;">기타피부암,<br/>갑상선암,<br/>제자리암,<br/>경계성종양</td>
+<td>20만원<br/>(다만, 계약일부터 1년 미만에 지급사유가 발생한 경우 상기 지급금액의 50%를 지급함)</td>
+</tr>
+</table>
+</td>
+</tr>
+</tbody>
+</table>"""
+
+
+@pytest.mark.unit
+def test_document_table_nested_in_another_table_is_not_collected(tmp_path):
+    """다른 표의 셀 안에 든 표는 LLM 에 보내지 않는다(#567).
+
+    청커는 중첩 표를 바깥 표 셀 텍스트로만 싣고 그 표의 설명은 청크에 싣지 않는다.
+    """
+    pytest.importorskip("docling.document_converter", exc_type=ImportError)
+    from docling.document_converter import DocumentConverter
+
+    path = tmp_path / "nested.html"
+    path.write_text(f"<!doctype html><html><body>{_NESTED_TABLE_HTML}</body></html>", encoding="utf-8")
+    doc = DocumentConverter().convert(path).document
+
+    targets = collect_table_text_targets(doc, _standalone().options)
+
+    assert len(doc.tables) == 2
+    assert [t.table_item.self_ref for t in targets] == [doc.tables[0].self_ref]
+
+
 def _add_table(doc: DoclingDocument, rows: list[list[str]]) -> None:
     cells = [
         TableCell(
