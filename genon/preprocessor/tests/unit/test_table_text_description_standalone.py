@@ -547,7 +547,24 @@ def test_document_table_nested_in_another_table_is_not_collected(tmp_path):
     assert [t.table_item.self_ref for t in targets] == [doc.tables[0].self_ref]
 
 
-def _add_table(doc: DoclingDocument, rows: list[list[str]]) -> None:
+@pytest.mark.unit
+def test_child_table_outside_rich_cells_is_still_collected():
+    """parent 만 표이고 rich cell 이 가리키지 않는 표는 청커가 자체 블록으로 싣으므로 보낸다(#567).
+
+    생성 데이터: 실물 HTML 에서는 이런 구조가 나오지 않는다(외부 Docling JSON·훅이 만들 수 있다).
+    표 값은 아래 보존치료 표(실물 발췌)를 따랐다.
+    """
+    doc = DoclingDocument(name="child")
+    _add_table(doc, [["구분", "지급금액"], ["인레이, 온레이", "15만원"], ["복합레진", "5만원"]])
+    _add_table(doc, [["구분", "지급금액"], ["인레이, 온레이", "5만원"], ["복합레진", "15만원"]],
+               parent=doc.tables[0])
+
+    targets = collect_table_text_targets(doc, _standalone().options)
+
+    assert [t.table_item.self_ref for t in targets] == [t.self_ref for t in doc.tables]
+
+
+def _add_table(doc: DoclingDocument, rows: list[list[str]], parent=None) -> None:
     cells = [
         TableCell(
             text=value,
@@ -557,7 +574,7 @@ def _add_table(doc: DoclingDocument, rows: list[list[str]]) -> None:
         )
         for r, row in enumerate(rows) for c, value in enumerate(row)
     ]
-    doc.add_table(data=TableData(num_rows=len(rows), num_cols=len(rows[0]), table_cells=cells))
+    doc.add_table(data=TableData(num_rows=len(rows), num_cols=len(rows[0]), table_cells=cells), parent=parent)
 
 
 @pytest.mark.unit
