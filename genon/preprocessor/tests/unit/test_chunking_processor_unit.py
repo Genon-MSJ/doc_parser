@@ -722,6 +722,53 @@ def test_title_only_chunk_not_lost():
     assert "장 본문입니다." in joined
 
 
+# 실물 발췌: 카카오 데브톡 Discourse 글(https://devtalk.kakao.com/t/topic/151298)의 <title>,
+# <noscript> 본문 시작부, 상단 로고 <img>. 본문이 <noscript> 안에만 있어 docling 결과가 제목과 그림뿐이다.
+_DEVTALK_EXCERPT = """<!DOCTYPE html>
+<html lang="ko"><head><title>카카오비즈니스 이용약관 개정 안내 - Notice / 공지 - 카카오 데브톡</title></head>
+<body class="">
+    <noscript data-path="/t/topic/151298">
+        <header>
+  <a href="/">카카오 데브톡</a>
+</header>
+        <div id="main-outlet" class="wrap" role="main">
+            <div id="topic-title">
+    <h1>
+      <a href="/t/topic/151298">카카오비즈니스 이용약관 개정 안내</a>
+    </h1>
+            </div>
+        </div>
+    </noscript>
+      <div class="custom-navbar">
+    <div class="wrap">
+        <a href="https://developers.kakao.com" target="_blank">
+            <img class="kakao-dev-logo" src="/uploads/default/original/3X/a/7/a7274086055333d7d5e218e5c8ba76ae30e74f6c.png" width="131" height="17">
+        </a>
+    </div>
+</div>
+    <section id='main'>
+    </section>
+</body></html>"""
+
+
+@pytest.mark.unit
+def test_html_without_body_text_chunks_without_page_lookup_error(tmp_path):
+    """본문 텍스트가 없는 HTML 도 청킹된다(#567).
+
+    pages 가 빈 문서에 청커의 최소 text item 폴백이 page_no=1 prov 를 달아, chunk_bboxes
+    계산이 없는 페이지를 조회하다 AttributeError 로 중단되던 결함의 재현이다.
+    """
+    pytest.importorskip("docling.document_converter", exc_type=ImportError)
+    from docling.document_converter import DocumentConverter
+
+    path = tmp_path / "devtalk.html"
+    path.write_text(_DEVTALK_EXCERPT, encoding="utf-8")
+    doc = DocumentConverter().convert(path).document
+
+    joined = "\n".join(v.text for v in _chunk(doc.model_dump(mode="json")))
+    assert "카카오비즈니스 이용약관 개정 안내" in joined
+
+
 @pytest.mark.unit
 def test_sibling_sections_are_not_rendered_as_parent_child():
     """형제 섹션을 한 청크에 담아도 부모-자식 경로로 표기하지 않는다."""
