@@ -576,7 +576,7 @@ llm:
 | `table_description` | `refine.prompt_file` | `prompt_table_refine_combined.md` | 재구성 HTML + 요약 통합 프롬프트 |
 | `custom_fields` | (인라인 옵션 또는 `config_file`) | — | 커스텀 필드 추출 enricher. 여러 개 지정 가능. 아래 [커스텀 필드 enricher](#커스텀-필드-enricher) 참고 |
 
-> `chart.enable: true` 면 변환 단계에서 docling 그림 분류가 자동 활성화됩니다. **런타임 kwargs**(호출 `params`, 0/1)로 오버라이드 가능: `img_desc`→`image_description.enable`, `chart_desc`(별칭 `chart_convert`)→`chart.enable`, `chart_detection`(1=auto/0=all), `doc_summary`→`doc_summary.enable`, `table_desc`→`table_description.enable`, `table_refine`→`table_description.refine.enable`. `chart_detection=1`(auto) 은 `chart.enable: true` 로 분류가 켜져 있어야 하며 아니면 `all` 로 강등됩니다.
+> `chart.enable: true` 면 변환 단계에서 docling 그림 분류가 자동 활성화됩니다. **런타임 kwargs**(호출 `params`, 0/1)로 오버라이드 가능: `img_desc`→`image_description.enable`, `chart_desc`(별칭 `chart_convert`)→`chart.enable`, `chart_detection`(1=auto/0=all), `doc_summary`→`doc_summary.enable`, `table_desc`→`table_description.enable`, `table_refine`→`table_description.refine.enable`, `table_text_desc`→`table_text_description.enable`. `chart_detection=1`(auto) 은 `chart.enable: true` 로 분류가 켜져 있어야 하며 아니면 `all` 로 강등됩니다.
 
 > **표 설명(table_description)**: `enable`(또는 `table_desc=1`) 이면 각 표 뒤에 `[표 설명]` 요약을 병기하고, `refine.enable`(또는 `table_refine=1`) 이면 표 구조를 재구성 HTML 로 만들어 표 본체를 교체합니다. 재구성/요약은 **element(parse) 및 markdown 출력**에 반영되며, `output.format: docling`(원본 보존)에서는 적용되지 않습니다. refine 표를 `table_format: markdown` 으로 낼 때 `compact_tables` 설정이 반영됩니다.
 
@@ -584,15 +584,20 @@ llm:
 >
 > **기본값 변경 안내**: 예약량을 적지 않은 기존 설정은 업그레이드만으로 예약량이 `8000` 에서 `max_tokens` 값으로 바뀝니다. `max_tokens` 가 8000보다 크면 입력 예산이 줄어 표가 더 여러 번에 나뉘어 호출될 수 있고, 8000보다 작으면 입력 예산이 늘어 한 번에 담기는 표가 많아집니다. 이전 동작이 필요하면 `completion_reserved_tokens: 8000` 을 명시합니다.
 >
-> **텍스트 표 설명에서 LLM 에 보내지 않는 표**: 표 청크만으로 주제와 내용이 드러나는 표는 설명을 받아도 검색에 새로 잡히는 질의가 없으므로 LLM 에 보내지 않습니다. `skip` 하위 키로 정하며, 문서유형 YAML 에서 키 단위로 덮어쓸 수 있습니다.
+> **텍스트 표 설명에서 LLM 에 보내지 않는 표**: 표 청크만으로 주제와 내용이 드러나는 표는 설명을 받아도 검색에 새로 잡히는 질의가 없으므로 LLM 에 보내지 않습니다. 안내 문구 한 칸짜리 표처럼 값이 하나뿐이거나 데이터 행이 없는 레이아웃 표는 자동으로 뺍니다. 그 밖의 조건은 `skip` 하위 키로 정하며, 문서유형 YAML 에서 키 단위로 덮어쓸 수 있습니다.
 >
 > | 키 | 기본값 | 대상 |
 > |---|---|---|
-> | `skip.layout` | `true` | 안내 문구 한 칸짜리 표처럼 값이 하나뿐이거나 데이터 행이 없는 레이아웃 표 |
 > | `skip.self_describing` | `false` | 구체적인 제목(섹션 제목·캡션·표 바로 위 한 줄)이 있고, 데이터 행 5개 이하·열 2~3개이며, 행 라벨을 뺀 값 셀이 문장형인 표. 값에 금액·비율·기간이 있거나 병합 셀·다단 헤더가 있으면 보냅니다 |
 > | `skip.contained_duplicate` | `false` | 같은 문서의 앞선 표 하나에 모든 행(헤더 포함)이 행 단위로 이미 실린 표. 앞 표의 병합 셀에 통째로 전사된 하위 표나 다른 쪽에 다시 실린 표가 해당하며, 셀 값만 같고 행의 짝이 다른 표는 보냅니다. 레코드 경로에서는 같은 레코드 안의 표끼리 비교합니다 |
 >
-> `self_describing` 과 `contained_duplicate` 는 문서유형마다 검색 결과를 확인한 뒤 켭니다. 표를 뺀 문서는 처리 로그에 `표 N개 중 M개를 LLM 전송에서 제외합니다(사유별 개수)` 가 남고, 호출 횟수는 모든 문서에 남습니다. 표준 설정은 청크에 싣지 않는 검색어를 만들지 않도록 `rag.search_terms_limit: 0` 입니다. `include_search_terms: true` 로 검색어를 청크에 실을 때는 이 값도 함께 올립니다.
+> `self_describing` 과 `contained_duplicate` 는 문서유형마다 검색 결과를 확인한 뒤 켭니다. 표를 뺀 문서는 처리 로그에 `표 N개 중 M개를 LLM 전송에서 제외합니다(사유별 개수)` 가 남고, 호출 횟수는 모든 문서에 남습니다.
+>
+> 어느 표가 빠졌는지 확인하려면 `skip: false` 로 레이아웃 표를 포함한 모든 생략을 끕니다. 공통 설정에 `skip: false` 를 두고 문서유형 YAML 에서 `skip.contained_duplicate: true` 처럼 한 조건만 켜면, 나머지 조건은 꺼진 채로 남습니다. 앞으로 생략 조건이 추가되어도 `skip: false` 는 그 조건까지 함께 끕니다.
+>
+> **검색어**: `rag.search_terms` 로 표마다 만들 검색어 개수를 정합니다. `0` 이면 만들지 않고, `N` 이면 최대 N개를 만들어 청크에 싣습니다. 표준 설정은 `0` 입니다. 이 키를 적지 않으면 검색어를 최대 8개 만들되 청크에는 싣지 않습니다. 옛 키 `rag.search_terms_limit`(생성 개수)와 `rag.include_search_terms`(청크 노출)도 계속 읽으며, 한 블록에 새 키와 함께 적으면 새 키가 우선합니다.
+>
+> **키 점검**: 이 블록과 `rag`·`skip` 하위에 모르는 키(오타 포함)나 잘못된 값이 있으면 기동 로그에 `[table_text_description]` 경고가 남고 그 값은 무시됩니다. 기동은 막지 않습니다. 배포 전에는 `tools/config_precheck/precheck_custom_fields.sh` 로 같은 점검을 실행할 수 있습니다.
 >
 > **이름 변경 안내**: 모델 context 한도 키 `max_context_tokens` 는 `model_context_tokens` 로 이름이 바뀌었습니다. 같은 블록의 `max_context_chars`(표 앞뒤 본문 길이)와 혼동되기 때문입니다. 옛 이름(`max_context_tokens`, `max_context`)도 계속 읽으므로 기존 설정은 그대로 동작하며, 한 블록에 둘 다 적으면 새 이름이 우선합니다. 적용 위치는 `precheck` 계열과 `table_text_description` 입니다.
 
