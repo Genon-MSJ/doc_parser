@@ -69,3 +69,28 @@ def test_nested_table_keeps_its_own_caption(tmp_path):
 
     captions = {t.caption_text(doc).strip() for t in doc.tables}
     assert captions == {"바깥표", "안쪽표"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cell", [
+    "월 최대 25,000원",                                             # 워드프레스 wp-block-table
+    '<figure class="image"><img src="card.png" alt="카드"></figure>월 최대 25,000원',  # 셀 안 이미지
+])
+def test_table_wrapped_in_figure_survives_conversion(tmp_path, cell):
+    """figure 분기가 첫 img 만 내보내면 figure 로 감싼 표가 본문에서 통째로 사라진다(#564)."""
+    doc = _convert(tmp_path, f"""
+        <figure class="wp-block-table"><table>
+          <thead><tr><th>전월실적</th><th>혜택</th></tr></thead>
+          <tbody><tr><td>30만원</td><td>{cell}</td></tr></tbody>
+        </table></figure>""")
+
+    assert len(doc.tables) == 1
+    assert "월 최대 25,000원" in doc.export_to_markdown()
+
+
+@pytest.mark.unit
+def test_image_only_figure_keeps_picture_and_caption(tmp_path):
+    doc = _convert(tmp_path, '<figure><img src="duck.png" alt="오리"><figcaption>오리 사진</figcaption></figure>')
+
+    assert (len(doc.pictures), len(doc.tables)) == (1, 0)
+    assert doc.pictures[0].caption_text(doc).strip() == "오리 사진"
