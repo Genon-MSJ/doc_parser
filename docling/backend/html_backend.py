@@ -2476,6 +2476,12 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
 
         elif tag_name == "table":
             num_rows, num_cols = self.get_html_table_row_col(tag)
+            # 자기 행 없이 <table> 을 직계 자식으로 둔 바깥 <table>(문서 변환기가 만든 HTML 등)은
+            # 표가 아니라 틀이다. 표로 만들면 셀 없는 빈 표만 남고 안쪽 표는 셀 순회(tr)에 걸리지
+            # 않아 통째로 사라지므로, 내용을 그대로 순회한다.
+            if num_rows == 0 and tag.find("table", recursive=False) is not None:
+                added_refs.extend(self._walk(tag, doc))
+                return added_refs
             data_e = TableData(num_rows=num_rows, num_cols=num_cols)
             table_prov = self._make_prov(text="", tag=tag)
             caption_item = self._emit_table_caption(tag, doc)

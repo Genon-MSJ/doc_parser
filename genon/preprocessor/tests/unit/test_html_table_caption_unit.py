@@ -156,3 +156,23 @@ def test_table_inside_list_is_kept_as_table(tmp_path, body, cell):
     assert len(doc.tables) == 1
     assert cell in [c.text for c in doc.tables[0].data.table_cells]
     assert not any(cell in t.text for t in doc.texts)
+
+
+# 실물 발췌: 검증 문서군 v5 web13(내부 샘플 sample_11.html, 증권사 리포트를 변환한 HTML) 첫 표.
+# 자기 행 없는 <table> 이 표 하나를 감싸고 있다. 행은 앞 4행과 출처 행만 남겼다.
+_REPORT_WRAPPED_TABLE = (
+    "<table id = 1_5 > <table border='1'><tr><td colspan=3 rowspan=1></td></tr>"
+    "<tr><td colspan=3 rowspan=1>▶ 주요 지표 일일 등락률</td></tr>"
+    "<tr><td colspan=1 rowspan=1>S&P 500 6,040.53pt</td><td colspan=1 rowspan=1>-0.50%</td><td colspan=1 rowspan=1></td></tr>"
+    "<tr><td colspan=1 rowspan=1>DOW 44,544.66pt</td><td colspan=1 rowspan=1>-0.75%</td><td colspan=1 rowspan=1></td></tr>"
+    "<tr><td colspan=3 rowspan=1>자료: Bloomberg, 삼성증권</td></tr></table> </table>"
+)
+
+
+@pytest.mark.unit
+def test_table_wrapping_only_a_table_keeps_inner_table(tmp_path):
+    """행 없이 표 하나만 감싼 바깥 표가 빈 표로 남고 안쪽 표가 사라지던 결함(#567)."""
+    doc = _convert(tmp_path, _REPORT_WRAPPED_TABLE)
+
+    assert len(doc.tables) == 1
+    assert "DOW 44,544.66pt" in [c.text for c in doc.tables[0].data.table_cells]
