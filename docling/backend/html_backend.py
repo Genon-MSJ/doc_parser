@@ -1856,7 +1856,9 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
             return AnnotatedTextList()
         if self._is_checkbox_label_tag(tag):
             return AnnotatedTextList()
-        if not ignore_list or (tag.name not in ["ul", "ol"]):
+        # ignore_list 는 <li> 의 직접 텍스트를 모을 때만 켠다. 하위 목록과 마찬가지로 <li> 안의
+        # <table> 도 _handle_list 가 표로 따로 내보내므로 목록 항목 텍스트에 섞지 않는다.
+        if not ignore_list or (tag.name not in ["ul", "ol", "table"]):
             for child in tag:
                 if isinstance(child, Tag) and child.name in _FORMAT_TAG_MAP:
                     with self._use_format([child.name]):
@@ -2170,13 +2172,15 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
         self.level += 1
 
         # For each top-level <li> in this list
-        for li in tag.find_all({"li", "ul", "ol"}, recursive=False):
+        # <ul> 의 직계 자식 <table> 은 잘못된 HTML 이지만 실물 웹 문서에 있다. 순회 대상에서
+        # 빠지면 표가 표로도 텍스트로도 남지 않으므로 하위 목록처럼 블록으로 처리한다.
+        for li in tag.find_all({"li", "ul", "ol", "table"}, recursive=False):
             if not isinstance(li, Tag):
                 continue
 
             # sub-list items should be indented under main list items, but temporarily
             # addressing invalid HTML (docling-core/issues/357)
-            if li.name in {"ul", "ol"}:
+            if li.name in {"ul", "ol", "table"}:
                 self._handle_block(li, doc)
 
             else:
@@ -2340,6 +2344,12 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
                     for sublist in li({"ul", "ol"}, recursive=False):
                         if isinstance(sublist, Tag):
                             self._handle_block(sublist, doc)
+
+                # <li> 안의 표는 목록 항목 텍스트에서 빠졌으므로(ignore_list) 여기서 표로 내보낸다.
+                # 하위 목록이나 다른 표 안의 표는 그쪽 처리가 맡는다.
+                for table_tag in li.find_all("table"):
+                    if table_tag.find_parent({"li", "ul", "ol", "table"}) is li:
+                        self._handle_block(table_tag, doc)
 
                 # 5) extract any images under this <li>
                 for img_tag in li("img"):
