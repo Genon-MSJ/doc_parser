@@ -523,6 +523,7 @@ EOF
 | `enrichment.image_description.enable` (`img_desc`) | 이미지 설명 | `chunking.chunk_mode` (`chunk_mode`) | `split_only` / `resize_all` |
 | `enrichment.doc_summary.enable` (`doc_summary`) | 문서 요약 | `chunking.recursive.chunk_overlap` (`chunk_overlap`) | 청크 간 겹침 |
 | `enrichment.toc.enable` (`toc`) | 목차 보강 | | |
+| `table_text_desc` (요청 파라미터 이름으로만 씀) | 텍스트 표 설명 | | |
 | `ocr.ocr_mode` | `auto` / `force` / `disable` | | |
 
 표로 표현할 수 없는 조건은 `config_by_condition()`에서 정합니다. 같은 형식의 dict를 돌려주고,
@@ -1508,7 +1509,7 @@ curl --location "${GW}/parser" \
 
 | facade | 자주 쓰는 `params` 키 |
 |---|---|
-| parser | `doc_type`, `toc`, `img_desc`, `chart_desc`, `table_desc`, `table_refine`, `doc_summary`, `save_images`, `use_hwp_sdk`, `log_level` |
+| parser | `doc_type`, `toc`, `img_desc`, `chart_desc`, `table_desc`, `table_refine`, `table_text_desc`, `doc_summary`, `save_images`, `use_hwp_sdk`, `log_level` |
 | chunking | `document`, `chunk_size`, `chunk_mode`, `include_chunk_header`, `chunk_overlap`, `table_as_chunk`, `export_to_html`, `log_level` |
 | intelligent / convert | 위 parser 키 + `chunk_size`, `chunk_mode`, `include_chunk_header`, `use_pdf_sdk`, `table_format`, `export_to_html` |
 | attachment | `chunker_type`, `chunk_size`, `chunk_overlap`, `use_pdf_sdk`, `use_hwp_sdk` |

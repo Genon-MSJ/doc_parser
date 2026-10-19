@@ -15,6 +15,7 @@ from genon.preprocessor.processing.common.config_parse import (
     resolve_model_context_tokens,
 )
 from genon.preprocessor.processing.common.markdown_export import export_markdown
+from genon.preprocessor.processing.enrichment.config_schema import TABLE_TEXT_SKIP_KEYS
 from genon.preprocessor.processing.chunking.table_shape import (
     analyze_grid,
     cell_text,
@@ -81,14 +82,43 @@ def _canonical_context_key(cfg: dict) -> dict:
     return merged
 
 
+def _canonical_rag_skip(cfg: dict) -> dict:
+    """한 계층 안의 편의 표기 둘을 내부 표기로 펼친다.
+
+    - `rag.search_terms: N` → `search_terms_limit: N`, `include_search_terms: N > 0`.
+      같은 계층에 옛 두 키가 함께 있으면 새 키가 우선한다. 값이 0 이상의 정수가 아니면 버린다.
+    - `skip: false` → 모든 조건을 false 로 둔 dict. dict 로 펼쳐 두어야 다른 계층의 skip 과
+      키 단위로 병합된다(위 계층의 `skip: false` 위에 문서유형이 한 조건만 켜면 나머지는 꺼진 채
+      남는다). 조건이 새로 생기면 `TABLE_TEXT_SKIP_KEYS` 에 넣는 것만으로 이 표기가 함께 끈다.
+
+    계층을 병합하기 **전에** 펼쳐야 한다. 병합 뒤에 펼치면 공통의 새 키가 문서유형의 옛 키를
+    이긴다(`_canonical_context_key` 와 같은 이유).
+    """
+    rag = cfg.get("rag")
+    expand_terms = isinstance(rag, dict) and "search_terms" in rag
+    if not expand_terms and cfg.get("skip") is not False:
+        return cfg
+    merged = dict(cfg)
+    if expand_terms:
+        value = rag["search_terms"]
+        sub = {k: v for k, v in rag.items() if k != "search_terms"}
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            sub["search_terms_limit"] = value
+            sub["include_search_terms"] = value > 0
+        merged["rag"] = sub
+    if cfg.get("skip") is False:
+        merged["skip"] = dict.fromkeys(TABLE_TEXT_SKIP_KEYS, False)
+    return merged
+
+
 def merge_table_text_description(common: dict | None, local: dict | None) -> dict:
     """프로세서 공통 설정 위에 문서유형 설정을 key 단위로 얹는다(문서유형 우선).
 
     `rag`·`skip` 하위도 통째로 교체하지 않고 key 단위로 병합해, 문서유형에서 한 항목만
     바꿔도 나머지 공통값이 살아 있게 한다.
     """
-    base = _canonical_context_key(canonical_enable_key(common))
-    override = _canonical_context_key(canonical_enable_key(local))
+    base = _canonical_rag_skip(_canonical_context_key(canonical_enable_key(common)))
+    override = _canonical_rag_skip(_canonical_context_key(canonical_enable_key(local)))
     merged = {**base, **override}
     for key in ("rag", "skip"):
         base_sub = base.get(key) if isinstance(base.get(key), dict) else {}
@@ -127,7 +157,7 @@ class TableTextDescriptionOptions:
 
     @classmethod
     def from_config(cls, cfg: dict | None) -> "TableTextDescriptionOptions":
-        cfg = cfg if isinstance(cfg, dict) else {}
+        cfg = _canonical_rag_skip(cfg) if isinstance(cfg, dict) else {}
         rag = cfg.get("rag") if isinstance(cfg.get("rag"), dict) else {}
         skip = cfg.get("skip") if isinstance(cfg.get("skip"), dict) else {}
         input_format = str(cfg.get("input_format") or "auto").strip().lower()
