@@ -16,6 +16,7 @@ from genon.preprocessor.processing.common.config_parse import (
 )
 from genon.preprocessor.processing.common.markdown_export import export_markdown
 from genon.preprocessor.processing.enrichment.config_schema import TABLE_TEXT_SKIP_KEYS
+from genon.preprocessor.processing.chunking.rich_cells import table_embedded_refs
 from genon.preprocessor.processing.chunking.table_shape import (
     analyze_grid,
     cell_text,
@@ -294,6 +295,8 @@ def _resolve_input_format(document: DoclingDocument, configured: str) -> str:
 SKIP_LAYOUT = "layout"
 SKIP_SELF_DESCRIBING = "self_describing"
 SKIP_CONTAINED_DUPLICATE = "contained_duplicate"
+# 청커가 바깥 표 셀(rich cell)로만 싣는 중첩 표. 이 표의 설명은 청크에 실리지 않는다.
+SKIP_NESTED = "nested"
 
 # 자기서술형 판정 임계. 값 셀이 이미 문장이면 설명이 덧붙일 정보가 없다.
 _SELF_DESC_MAX_DATA_ROWS = 5
@@ -454,6 +457,8 @@ def collect_table_text_targets(
     skipped: list[str] = []
     # 중복 판정의 비교 대상. 뺀 표도 본문은 청크에 남으므로 모든 표를 넣는다.
     previous: list[list[str]] = []
+    # 청커(`smart_chunker`)가 문서 순회에서 건너뛰는 아이템과 같은 집합이다.
+    embedded = table_embedded_refs(document) if options.skip_layout else set()
     total = 0
     for index, item in enumerate(items):
         if not isinstance(item, TableItem):
@@ -468,10 +473,15 @@ def collect_table_text_targets(
             table_row_texts(getattr(getattr(item, "data", None), "grid", None))
             if options.skip_contained_duplicate else []
         )
-        reason = _item_skip_reason(
-            item, [section_header, caption, _table_title_line(items, index)], options,
-            rows, previous,
-        )
+        # 바깥 표 셀로만 실리는 중첩 표는 레이아웃 표와 같이 청커가 자체 블록으로 내지 않는 표라
+        # skip_layout 으로 함께 뺀다.
+        if getattr(item, "self_ref", None) in embedded:
+            reason = SKIP_NESTED
+        else:
+            reason = _item_skip_reason(
+                item, [section_header, caption, _table_title_line(items, index)], options,
+                rows, previous,
+            )
         previous.append(rows)
         if reason:
             skipped.append(reason)
