@@ -2380,11 +2380,17 @@ class HTMLDocumentBackend(DeclarativeDocumentBackend):
         tag_name = tag.name.lower()
 
         if tag_name == "figure":
-            img_tag = tag.find("img")
-            if isinstance(img_tag, Tag):
-                im_ref = self._emit_image(img_tag, doc)
-                if im_ref is not None:
-                    added_refs.append(im_ref)
+            # 직계 자식에 <table> 이 있는 figure(워드프레스 wp-block-table 등)는 그림이
+            # 아니라 표를 감싼 틀이다. 아래 img 경로는 첫 <img>(표 셀 안 이미지 포함)만
+            # 내보내고 나머지 자식을 버려 표가 본문에서 통째로 사라지므로, 내용을 그대로 순회한다.
+            if tag.find("table", recursive=False) is not None:
+                added_refs.extend(self._walk(tag, doc))
+            else:
+                img_tag = tag.find("img")
+                if isinstance(img_tag, Tag):
+                    im_ref = self._emit_image(img_tag, doc)
+                    if im_ref is not None:
+                        added_refs.append(im_ref)
 
         elif tag_name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             heading_refs = self._handle_heading(tag, doc)
