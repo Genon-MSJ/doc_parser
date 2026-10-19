@@ -71,29 +71,33 @@ def test_nested_table_keeps_its_own_caption(tmp_path):
     assert captions == {"바깥표", "안쪽표"}
 
 
+# 실물 발췌(#564 재현 입력): v5 web05(MNT 고유가 피해지원금 글)의 워드프레스 wp-block-table 과
+# v5 web03(삼성카드 추천 비교 글)의 셀 안에 그림이 든 figure>table.
+_WP_BLOCK_TABLE = """<figure class="wp-block-table"><table class="has-fixed-layout"><thead><tr><th>구분</th><th>수도권</th><th>비수도권</th><th>우대지원지역</th><th>특별지원지역</th></tr></thead><tbody><tr><td><strong>기초생활수급자</strong></td><td>55만 원</td><td>60만 원</td><td>60만 원</td><td>60만 원</td></tr><tr><td><strong>차상위·한부모</strong></td><td>45만 원</td><td>50만 원</td><td>50만 원</td><td>50만 원</td></tr><tr><td><strong>그 외 국민 70%</strong></td><td>10만 원</td><td>15만 원</td><td>20만 원</td><td>25만 원</td></tr></tbody></table></figure>"""
+_FIGURE_TABLE_WITH_CELL_IMAGE = """<figure class="table" style="width:500px;"><table><thead><tr><th><p style="text-align:center;">카드명</p></th><th style="width:200px;"><p style="text-align:center;">삼성카드 &amp; MILEAGE PLATINUM (스카이패스)</p></th><th><p style="text-align:center;">혜택</p></th></tr></thead><tbody><tr><td style="background-color:#f2f2f2;"><p style="text-align:center;"><strong>디자인</strong></p></td><td><figure class="image"><img height="281" src="https://image.ajd.co.kr/EDITOR/CONTENT/01KF2P1T9QNM99AWS0XD8ZN9HQ" style="aspect-ratio:178/281;" width="178"/></figure></td><td rowspan="2"><p style="text-align:center;"><strong>1천 원당 스카이패스 1 항공 마일리지 적립</strong></p><p style="text-align:center;"> </p><p style="text-align:center;"><strong>해외형,국내형 선택</strong><br/><strong>1천 원당 스카이패스 1 항공 마일리지 추가 적립</strong><br/><span style="font-size:12px;">(월 2천 마일리지)</span></p></td></tr><tr><td style="background-color:#f2f2f2;"><p style="text-align:center;"><strong>조건</strong></p></td><td><p style="text-align:center;">연회비 49,000원<br/>전월 실적 없음</p></td></tr></tbody></table></figure>"""
+# 실물 발췌: v5 web02(뱅크샐러드 삼성카드 추천 글)의 그림만 담은 figure(<picture> + <figcaption>).
+_IMAGE_ONLY_FIGURE = """<figure class="my-20 grid gap-y-12 overflow-scroll"><picture class="relative block aspect-[3/2] w-full"><source sizes="(max-width: 480px) 400w, (max-width: 1200px) 750w, 33vw" srcset="https://financialshopping-cdn.banksalad.com/large-webp_and_MILEAGE_PLATINUM_1d49831c97.webp 1000w, https://financialshopping-cdn.banksalad.com/medium-webp_and_MILEAGE_PLATINUM_1d49831c97.webp 750w, https://financialshopping-cdn.banksalad.com/small-webp_and_MILEAGE_PLATINUM_1d49831c97.webp 400w" type="image/webp"/><source sizes="(max-width: 480px) 400w, (max-width: 1200px) 750w, 33vw" srcset="https://financialshopping-cdn.banksalad.com/large-png_and_MILEAGE_PLATINUM_1d49831c97.png 1000w, https://financialshopping-cdn.banksalad.com/medium-png_and_MILEAGE_PLATINUM_1d49831c97.png 750w, https://financialshopping-cdn.banksalad.com/small-png_and_MILEAGE_PLATINUM_1d49831c97.png 400w" type="image/png"/><img alt="마일리지 적립 앤마일리지 신용카드 추천 2024 " class="absolute h-full w-full object-cover align-middle rounded-[20px]" decoding="async" loading="lazy" src="https://financialshopping-cdn.banksalad.com/and_MILEAGE_PLATINUM_1d49831c97.png"/></picture><figcaption><p class="max-w-full text-[14px] leading-[130%] scroll-mt-[130px] md:scroll-mt-[155px] text-gray-400 text-center"><span style="background-color:#ffffff;color:inherit;font-family:Roboto,sans-serif;font:inherit"><span style="font-size:10.5pt;font-style:normal;font-variant:normal;font-weight:400;text-decoration:none;vertical-align:baseline;white-space:pre-wrap;color:inherit;font:inherit">삼성카드 &amp; MILEAGE PLATINUM(스카이패스)</span></span></p></figcaption></figure>"""
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize("cell", [
-    "월 최대 25,000원",                                             # 워드프레스 wp-block-table
-    '<figure class="image"><img src="card.png" alt="카드"></figure>월 최대 25,000원',  # 셀 안 이미지
-])
-def test_table_wrapped_in_figure_survives_conversion(tmp_path, cell):
+@pytest.mark.parametrize("body, text", [
+    (_WP_BLOCK_TABLE, "60만 원"),
+    (_FIGURE_TABLE_WITH_CELL_IMAGE, "연회비 49,000원"),
+], ids=["wp_block_table", "cell_image"])
+def test_table_wrapped_in_figure_survives_conversion(tmp_path, body, text):
     """figure 분기가 첫 img 만 내보내면 figure 로 감싼 표가 본문에서 통째로 사라진다(#564)."""
-    doc = _convert(tmp_path, f"""
-        <figure class="wp-block-table"><table>
-          <thead><tr><th>전월실적</th><th>혜택</th></tr></thead>
-          <tbody><tr><td>30만원</td><td>{cell}</td></tr></tbody>
-        </table></figure>""")
+    doc = _convert(tmp_path, body)
 
     assert len(doc.tables) == 1
-    assert "월 최대 25,000원" in doc.export_to_markdown()
+    assert text in doc.export_to_markdown()
 
 
 @pytest.mark.unit
 def test_image_only_figure_keeps_picture_and_caption(tmp_path):
-    doc = _convert(tmp_path, '<figure><img src="duck.png" alt="오리"><figcaption>오리 사진</figcaption></figure>')
+    doc = _convert(tmp_path, _IMAGE_ONLY_FIGURE)
 
     assert (len(doc.pictures), len(doc.tables)) == (1, 0)
-    assert doc.pictures[0].caption_text(doc).strip() == "오리 사진"
+    assert doc.pictures[0].caption_text(doc).strip() == "삼성카드 & MILEAGE PLATINUM(스카이패스)"
 
 
 # 실물 발췌: 서울시설공단 개인정보처리방침(https://sisul.or.kr/open_content/main/guidance/pim.jsp)
