@@ -232,7 +232,10 @@ def _prepare_rows(
     # 행 문장은 표기형태와 무관하다. 한 번 만들어 모든 형식이 공유한다. 하위 헤더 없는
     # 병합 헤더 셀은 표 헤더에 한 번 남으므로 행 요약 라벨에서는 뺀다.
     line_labels = flatten_header_rows(grid, header_row_count, num_cols, keep_merged_leaf=False)
-    row_lines = serialize_rows(data_rows, line_labels, num_cols) if row_serialization else []
+    # 요약할 값이 없는 행(전체 폭 각주 등)은 빈 줄로 두어 data_rows 와 인덱스를 맞춘다.
+    row_lines = [
+        "\n".join(serialize_rows([row], line_labels, num_cols)) for row in data_rows
+    ] if row_serialization else []
     return _PreparedRows(
         header_rows, data_rows, header_labels, line_labels,
         renderer, rendered_rows, row_lines, normalized_spans)
