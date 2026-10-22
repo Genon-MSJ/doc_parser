@@ -263,7 +263,8 @@ llm:
 # `skip: false` 는 이 생략과 아래 조건을 모두 끈다(어느 표가 빠졌는지 확인할 때 쓴다).
 # `skip.self_describing`(기본 false, 제목이 있고 값이 문장인 작은 표. 금액·비율·기간 값이나
 # 병합 셀이 있으면 보낸다), `skip.contained_duplicate`(기본 false, 앞선 표 하나에 모든 행이 행
-# 단위로 이미 실린 중복 표). 표가 많은 문서유형에서 검색 결과를 확인한 뒤 켠다.
+# 단위로 이미 실린 중복 표), `skip.long_cells`(기본 0=끔, 첫 행·첫 열을 뺀 값 칸 평균 문자 수가
+# 이 값 이상인 긴 문장 표. 모니모 상품설명서는 100). 표가 많은 문서유형에서 검색 결과를 확인한 뒤 켠다.
 # table_text_description:
 #   enable: true
 #   prompt_template_file: prompt_table_text_description_rag.md

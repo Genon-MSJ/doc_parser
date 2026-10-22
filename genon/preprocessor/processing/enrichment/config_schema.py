@@ -211,7 +211,7 @@ TABLE_TEXT_RAG_KEYS = frozenset({
     "search_terms", "search_terms_limit", "include_search_terms", "repeat_context_on_split",
 })
 # LLM 전송에서 뺄 표의 조건. `skip: false` 는 여기 있는 조건을 모두 끈다.
-TABLE_TEXT_SKIP_KEYS = ("layout", "self_describing", "contained_duplicate")
+TABLE_TEXT_SKIP_KEYS = ("layout", "self_describing", "contained_duplicate", "long_cells")
 
 
 def diagnose_table_text_description(block) -> list[str]:
