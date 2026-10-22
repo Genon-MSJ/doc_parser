@@ -264,7 +264,7 @@ llm:
 # `skip.self_describing`(기본 false, 제목이 있고 값이 문장인 작은 표. 금액·비율·기간 값이나
 # 병합 셀이 있으면 보낸다), `skip.contained_duplicate`(기본 false, 앞선 표 하나에 모든 행이 행
 # 단위로 이미 실린 중복 표), `skip.long_cells`(기본 0=끔, 첫 행·첫 열을 뺀 값 칸 평균 문자 수가
-# 이 값 이상인 긴 문장 표. 파서 설정은 100). 표가 많은 문서유형에서 검색 결과를 확인한 뒤 켠다.
+# 이 값 이상인 긴 문장 표. 모니모 상품설명서는 100). 표가 많은 문서유형에서 검색 결과를 확인한 뒤 켠다.
 # table_text_description:
 #   enable: true
 #   prompt_template_file: prompt_table_text_description_rag.md

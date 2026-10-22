@@ -81,6 +81,15 @@ body:
   # 본문(HEADER 제외)이 200자 미만인 청크를 다음 청크에 붙인다. 제목만 있거나 본문이 1~2줄인
   # 섹션은 HEADER 경로가 청크의 큰 몫을 차지해 제목 검색어로만 상위에 오르고 답변 근거는 주지 못한다.
   merge_short: 200
+# LLM 사용량 절감(표 설명 절감 실험의 채택안). 공통 설정 위에 이 문서유형만 설명을 짧게 받고
+# (검색 문맥 150자·핵심 사실 1개), 값 칸 평균이 100자 이상인 긴 문장 표는 설명하지 않는다.
+# 입력 문맥 축소(앞 2·뒤 1항목, 400자)와 레이아웃·중첩 표 생략은 공통 설정에서 이미 적용된다.
+table_text_description:
+  rag:
+    retrieval_context_max_chars: 150
+    key_fact_limit: 1
+  skip:
+    long_cells: 100
 # llm:
 # - out: [PRODUCT_NM, PRODUCT_ATTRS]
 #   parser:
