@@ -134,10 +134,11 @@ def test_search_terms_expands_per_layer_before_merge(common_rag, local_rag, expe
 
 @pytest.mark.unit
 @pytest.mark.parametrize("common,local,expected", [
-    (False, None, (False, False, False)),
-    ({"contained_duplicate": True}, False, (False, False, False)),
-    (False, {"contained_duplicate": True}, (False, False, True)),
-    ("off", None, (True, False, False)),
+    (False, None, (False, False, False, 0)),
+    ({"contained_duplicate": True}, False, (False, False, False, 0)),
+    (False, {"contained_duplicate": True}, (False, False, True, 0)),
+    (False, {"long_cells": 100}, (False, False, False, 100)),
+    ("off", None, (True, False, False, 0)),
 ])
 def test_skip_false_turns_off_every_condition_then_merges_per_key(common, local, expected):
     """`skip: false` 는 모든 조건을 false 로 펼쳐 다른 계층의 skip 과 키 단위로 병합한다."""
@@ -145,7 +146,8 @@ def test_skip_false_turns_off_every_condition_then_merges_per_key(common, local,
     merged = merge_table_text_description({"skip": common}, local_cfg)
     options = TableTextDescriptionOptions.from_config(merged)
     assert (
-        options.skip_layout, options.skip_self_describing, options.skip_contained_duplicate
+        options.skip_layout, options.skip_self_describing, options.skip_contained_duplicate,
+        options.skip_long_cells,
     ) == expected
 
 

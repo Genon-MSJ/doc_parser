@@ -40,9 +40,11 @@ from .table_description import TABLE_RETRIEVAL_LABEL
 from .table_text_context import (
     SKIP_CONTAINED_DUPLICATE,
     SKIP_LAYOUT,
+    SKIP_LONG_CELLS,
     SKIP_SELF_DESCRIBING,
     TableTextDescriptionOptions,
     TableTextTarget,
+    avg_value_chars,
     is_contained_duplicate,
     is_self_describing,
     log_skipped_tables,
@@ -167,14 +169,18 @@ def text_table_skip_reason(
         return SKIP_LAYOUT
     if options.skip_contained_duplicate and is_contained_duplicate(rows or [], previous or []):
         return SKIP_CONTAINED_DUPLICATE
-    if not options.skip_self_describing:
+    if not (options.skip_self_describing or options.skip_long_cells):
         return None
     grid = tbk.block_grid(kind, text)
     if grid is None or not grid.rows:
         return None
     anchors = [target.section_header, grid.caption, tbk.table_title_line(target.before_context)]
-    if is_self_describing(grid.rows, grid.num_cols, anchors, header_rows=grid.header_rows):
+    if options.skip_self_describing and is_self_describing(
+        grid.rows, grid.num_cols, anchors, header_rows=grid.header_rows
+    ):
         return SKIP_SELF_DESCRIBING
+    if options.skip_long_cells and avg_value_chars(grid.rows) >= options.skip_long_cells:
+        return SKIP_LONG_CELLS
     return None
 
 

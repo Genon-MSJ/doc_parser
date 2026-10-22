@@ -247,6 +247,8 @@ enrichment:
         key_fact_limit: 1                # 원표에서 직접 확인되는 핵심 사실 최대 개수
         key_fact_max_chars: 120          # 핵심 사실 1개당 최대 문자 수
         search_terms: 0                  # 검색어 개수. 0=만들지 않음, N=최대 N개를 만들어 청크에 싣는다
+      skip:
+        long_cells: 100                  # 첫 행·첫 열을 뺀 값 칸 평균이 100자 이상인 긴 문장 표는 설명하지 않는다. 0=끔
 
   # ── 문서유형별 custom_fields 추출 ──────────────────────────────────────────
   # doc_type(요청 kwargs)과 일치하는 설정만 동작. 배포 시 enable/serving ID 설정 후 사용.

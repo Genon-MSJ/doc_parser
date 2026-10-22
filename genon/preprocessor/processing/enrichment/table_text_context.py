@@ -152,9 +152,11 @@ class TableTextDescriptionOptions:
     # 설명할 내용이 없으므로 기본으로
     # 빼고, 자기서술형 표는 검색 품질 확인이 문서유형마다 필요해 기본으로 끈다.
     # 앞선 표에 이미 실린 중복 표도 같은 이유로 문서유형에서 켠다.
+    # 값 셀 평균 문자 수가 이 값 이상인 긴 문장 표도 뺀다(0 이면 끈다). 파서 설정에서 켠다.
     skip_layout: bool = True
     skip_self_describing: bool = False
     skip_contained_duplicate: bool = False
+    skip_long_cells: int = 0
 
     @classmethod
     def from_config(cls, cfg: dict | None) -> "TableTextDescriptionOptions":
@@ -194,6 +196,7 @@ class TableTextDescriptionOptions:
             skip_layout=_as_bool(skip.get("layout"), True),
             skip_self_describing=_as_bool(skip.get("self_describing"), False),
             skip_contained_duplicate=_as_bool(skip.get("contained_duplicate"), False),
+            skip_long_cells=_as_int(skip.get("long_cells"), 0),
         )
 
     @property
@@ -295,6 +298,7 @@ def _resolve_input_format(document: DoclingDocument, configured: str) -> str:
 SKIP_LAYOUT = "layout"
 SKIP_SELF_DESCRIBING = "self_describing"
 SKIP_CONTAINED_DUPLICATE = "contained_duplicate"
+SKIP_LONG_CELLS = "long_cells"
 # 청커가 바깥 표 셀(rich cell)로만 싣는 중첩 표. 이 표의 설명은 청크에 실리지 않는다.
 SKIP_NESTED = "nested"
 
@@ -352,6 +356,18 @@ def is_self_describing(
     if sentences < _SELF_DESC_SENTENCE_RATIO * len(values):
         return False
     return not any(_CONDITION_VALUE_RE.search(value) for value in values)
+
+
+def avg_value_chars(grid: Any) -> float:
+    """첫 행·첫 열을 뺀 비어 있지 않은 값 셀의 평균 문자 수(연속 공백은 하나로 센다).
+
+    행이 하나뿐이면 그 행 전체, 열이 하나뿐이면 그 열 전체를 본다. 셀이 이미 긴 문장인 표는
+    설명이 덧붙일 정보가 적다. 헤더 행 수는 보지 않고 첫 행을 늘 뺀다(실험의 판정식과 같다).
+    """
+    rows = [[" ".join(cell_text(cell).split()) for cell in row] for row in grid or []]
+    body = rows[1:] if len(rows) > 1 else rows
+    values = [text for row in body for text in (row[1:] if len(row) > 1 else row) if text]
+    return sum(map(len, values)) / len(values) if values else 0.0
 
 
 # 중복 판정에서 본문이 이보다 짧은 표는 보지 않는다. 숫자 몇 개뿐인 표는 다른 표의 셀에
@@ -428,6 +444,8 @@ def _item_skip_reason(
         return SKIP_CONTAINED_DUPLICATE
     if options.skip_self_describing and is_self_describing(grid, num_cols, anchors):
         return SKIP_SELF_DESCRIBING
+    if options.skip_long_cells and avg_value_chars(grid) >= options.skip_long_cells:
+        return SKIP_LONG_CELLS
     return None
 
 
