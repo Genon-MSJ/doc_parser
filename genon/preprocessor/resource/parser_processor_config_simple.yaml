@@ -88,12 +88,12 @@ enrichment:
       temperature: 0.0
       timeout: 600             # 배치당 생성량이 늘어난 만큼 호출 타임아웃도 올린다
       prompt_template_file: prompt_table_text_description_rag.md
-      before_items: 2          # 표 앞쪽 본문 아이템 수
-      after_items: 1           # 표 뒤쪽 본문 아이템 수
-      max_context_chars: 400   # 앞/뒤 문맥 각각의 최대 문자 수
+      before_items: 3          # 표 앞쪽 본문 아이템 수
+      after_items: 2           # 표 뒤쪽 본문 아이템 수
+      max_context_chars: 1500  # 앞/뒤 문맥 각각의 최대 문자 수
       rag:
-        retrieval_context_max_chars: 150 # 모든 분할 표 청크에 반복할 독립 검색 문맥
-        key_fact_limit: 1                # 원표에서 직접 확인되는 핵심 사실 최대 개수
+        retrieval_context_max_chars: 200 # 모든 분할 표 청크에 반복할 독립 검색 문맥
+        key_fact_limit: 2                # 원표에서 직접 확인되는 핵심 사실 최대 개수
         key_fact_max_chars: 120          # 핵심 사실 1개당 최대 문자 수
         search_terms: 0                  # 검색어 개수. 0=만들지 않음, N=최대 N개를 만들어 청크에 싣는다
 
