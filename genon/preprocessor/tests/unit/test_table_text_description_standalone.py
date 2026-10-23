@@ -453,8 +453,8 @@ AMOUNT_RECORD = """**ㅁ 소지품(보상가능) 과 휴대품(보상불가)**
     ("**[AI 에이전트용]**\n\n" + REPAIR_TABLE, {"self_describing_table": True}, None),  # 굵은 태그는 제목 아님
     (AGE_RECORD, {"self_describing_table": True}, None),             # 키-값 조건표
     (AMOUNT_RECORD, {"self_describing_table": True}, None),          # 금액 값
-    (AMOUNT_RECORD, {"long_text_table": {"min_avg_chars": 39}}, "long_text_table"),  # 값 칸 평균 39.7자(첫 행·첫 열 제외)
-    (AMOUNT_RECORD, {"long_text_table": {"min_avg_chars": 40}}, None),
+    (AMOUNT_RECORD, {"long_text_table": 39}, "long_text_table"),  # 값 칸 평균 39.7자(첫 행·첫 열 제외)
+    (AMOUNT_RECORD, {"long_text_table": 40}, None),
 ])
 def test_record_table_skip_reason(record, skip, expected):
     options = _standalone(skip=skip).options

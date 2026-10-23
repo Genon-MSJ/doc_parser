@@ -127,18 +127,6 @@ def _skip_options(*layers):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("layers,expected", [
-    # long_text_table 은 한 단계 더 내려가 병합한다
-    ([{"long_text_table": {"min_avg_chars": 100}}, {"long_text_table": {}}], 100),
-    ([{"long_text_table": {"min_avg_chars": 100}}, {"long_text_table": {"min_avg_chars": 65}}], 65),
-    ([{"long_text_table": {"min_avg_chars": 100}}, {"long_text_table": {"min_avg_chars": 0}}], 0),
-    ([{"long_text_table": {"min_avg_chars": 100}}, {"long_text_table": False}], 0),
-])
-def test_long_text_table_merges_per_key(layers, expected):
-    assert _skip_options(*layers)[4] == expected
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize("common_rag,local_rag,expected", [
     ({"search_terms": 0}, {"search_terms_limit": 3, "include_search_terms": True}, (3, True)),
     ({"search_terms_limit": 0, "include_search_terms": False}, {"search_terms": 4}, (4, True)),
@@ -160,9 +148,9 @@ def test_search_terms_expands_per_layer_before_merge(common_rag, local_rag, expe
 @pytest.mark.parametrize("common,local,expected", [
     (False, None, (False, False, False, False, 0)),
     ({"duplicate_table": True}, False, (False, False, False, False, 0)),
-    ({"long_text_table": {"min_avg_chars": 100}}, False, (False, False, False, False, 0)),
+    ({"long_text_table": 100}, False, (False, False, False, False, 0)),
     (False, {"duplicate_table": True}, (False, False, True, False, 0)),
-    (False, {"long_text_table": {"min_avg_chars": 100}}, (False, False, False, False, 100)),
+    (False, {"long_text_table": 100}, (False, False, False, False, 100)),
     ("off", None, (True, True, False, False, 0)),
 ])
 def test_skip_false_turns_off_every_condition_then_merges_per_key(common, local, expected):
@@ -181,7 +169,7 @@ def test_skip_false_turns_off_every_condition_then_merges_per_key(common, local,
     ([{"long_cells": False}], (True, True, False, False, 0)),
     ([{"long_cells": True}], (True, True, False, False, 0)),                    # bool 은 받지 않는다
     # 계층 병합 전에 펼치므로 문서유형의 옛 키가 공통의 새 키를 이긴다
-    ([{"long_text_table": {"min_avg_chars": 65}}, {"long_cells": 100}], (True, True, False, False, 100)),
+    ([{"long_text_table": 65}, {"long_cells": 100}], (True, True, False, False, 100)),
     ([{"duplicate_table": True}, {"contained_duplicate": False}], (True, True, False, False, 0)),
 ])
 def test_old_skip_keys_are_expanded_to_new_keys(layers, expected):
@@ -209,12 +197,10 @@ def test_block_key_diagnosis(block, expected):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("skip,count,tokens", [
-    ({"single_value_table": True, "long_text_table": {"min_avg_chars": 100}}, 0, []),
+    ({"single_value_table": True, "long_text_table": 100}, 0, []),
     ({"single_value_table": "yes"}, 1, ["`skip.single_value_table`", "true 또는 false"]),
-    ({"long_text_table": True}, 1, ["`skip.long_text_table`", "min_avg_chars"]),
-    ({"long_text_table": {"min_avg_chars": True}}, 1, ["`skip.long_text_table.min_avg_chars`", "0 이상의 정수"]),
-    ({"long_text_table": {"min_avg_chars": -5}}, 1, ["0 이상의 정수"]),
-    ({"long_text_table": {"min_avg_char": 100}}, 1, ["`skip.long_text_table.min_avg_char`", "min_avg_chars"]),
+    ({"long_text_table": True}, 1, ["`skip.long_text_table`", "0 이상의 정수"]),
+    ({"long_text_table": {"min_avg_chars": 100}}, 1, ["`skip.long_text_table`", "0 이상의 정수"]),
     ({"long_cells": 100}, 1, ["`skip.long_cells`", "옛 이름", "long_text_table"]),
     ({"long_cells": True}, 2, ["옛 이름", "0 이상의 정수"]),
     ({"layout": False, "nested_table": True}, 2, ["옛 이름", "함께 적었습니다", "새 키가 우선"]),

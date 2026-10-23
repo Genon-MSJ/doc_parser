@@ -16,7 +16,6 @@ from genon.preprocessor.processing.common.config_parse import (
 )
 from genon.preprocessor.processing.common.markdown_export import export_markdown
 from genon.preprocessor.processing.enrichment.config_schema import (
-    TABLE_TEXT_LONG_TEXT_KEY,
     TABLE_TEXT_SKIP_KEYS,
     TABLE_TEXT_SKIP_OLD_KEYS,
 )
@@ -54,9 +53,8 @@ def _skip_flag(value: Any, default: bool) -> bool:
 
 
 def _long_text_min_chars(value: Any) -> int:
-    """`long_text_table: {min_avg_chars: N}` 의 N. false·키 없음·0 이상의 정수가 아닌 값은 0(끔)이다."""
-    n = value.get("min_avg_chars") if isinstance(value, dict) else None
-    return n if isinstance(n, int) and not isinstance(n, bool) and n >= 0 else 0
+    """`long_text_table: N` 의 N. false·키 없음·0 이상의 정수가 아닌 값(true 포함)은 0(끔)이다."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 # 응답 크기 추정에 쓰는 고정값. search_terms 는 상한만 있고 길이 규정이 없어 표현 1개를
@@ -132,8 +130,6 @@ def _canonical_rag_skip(cfg: dict) -> dict:
         for old, news in TABLE_TEXT_SKIP_OLD_KEYS.items():
             if old in skip:
                 value = skip[old]
-                if old == "long_cells" and value is not False:
-                    value = {"min_avg_chars": value}
                 for new in news:
                     expanded.setdefault(new, value)
         merged["skip"] = expanded
@@ -144,8 +140,7 @@ def merge_table_text_description(common: dict | None, local: dict | None) -> dic
     """프로세서 공통 설정 위에 문서유형 설정을 key 단위로 얹는다(문서유형 우선).
 
     `rag`·`skip` 하위도 통째로 교체하지 않고 key 단위로 병합해, 문서유형에서 한 항목만
-    바꿔도 나머지 공통값이 살아 있게 한다. dict 값인 `skip.long_text_table` 은 한 단계 더
-    내려가 같은 방식으로 병합한다.
+    바꿔도 나머지 공통값이 살아 있게 한다.
     """
     base = _canonical_rag_skip(_canonical_context_key(canonical_enable_key(common)))
     override = _canonical_rag_skip(_canonical_context_key(canonical_enable_key(local)))
@@ -155,11 +150,6 @@ def merge_table_text_description(common: dict | None, local: dict | None) -> dic
         override_sub = override.get(key) if isinstance(override.get(key), dict) else {}
         if base_sub or override_sub:
             merged[key] = {**base_sub, **override_sub}
-            if key == "skip":
-                base_long = base_sub.get(TABLE_TEXT_LONG_TEXT_KEY)
-                override_long = override_sub.get(TABLE_TEXT_LONG_TEXT_KEY)
-                if isinstance(base_long, dict) and isinstance(override_long, dict):
-                    merged[key][TABLE_TEXT_LONG_TEXT_KEY] = {**base_long, **override_long}
     return merged
 
 

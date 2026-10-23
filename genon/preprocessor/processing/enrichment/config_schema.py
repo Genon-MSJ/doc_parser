@@ -211,10 +211,9 @@ TABLE_TEXT_RAG_KEYS = frozenset({
     "search_terms", "search_terms_limit", "include_search_terms", "repeat_context_on_split",
 })
 # LLM 전송에서 뺄 표의 종류. `skip: false` 는 여기 있는 종류를 모두 끈다. 앞의 넷은 true/false 이고,
-# `long_text_table` 만 false 또는 `{min_avg_chars: N}` 이다.
+# `long_text_table` 만 값 칸 평균 문자 수의 하한(0 이상의 정수, 0 또는 false 면 끔)이다.
 TABLE_TEXT_SKIP_FLAG_KEYS = ("single_value_table", "nested_table", "duplicate_table", "self_describing_table")
 TABLE_TEXT_LONG_TEXT_KEY = "long_text_table"
-TABLE_TEXT_LONG_TEXT_SUBKEYS = frozenset({"min_avg_chars"})
 TABLE_TEXT_SKIP_KEYS = (*TABLE_TEXT_SKIP_FLAG_KEYS, TABLE_TEXT_LONG_TEXT_KEY)
 # 옛 키 → 새 키. 옛 키는 계층 병합 전에 새 키로 펼친다(`table_text_context._canonical_rag_skip`).
 # 옛 `layout` 은 값 한 칸 표와 중첩 표를 함께 켜고 껐으므로 새 키 둘로 펼친다.
@@ -232,21 +231,7 @@ def _is_nonneg_int(value) -> bool:
 
 def _diagnose_skip_value(key: str, value) -> list[str]:
     """`skip` 하위 키 하나의 값 형식을 검사한다. 위반한 값은 무시되어 기본값이 쓰인다."""
-    if key == TABLE_TEXT_LONG_TEXT_KEY:
-        if value is False:
-            return []
-        if not isinstance(value, dict):
-            return [f"`skip.{key}` 는 false 또는 `min_avg_chars: N` 형태여야 합니다(받은 값: {value!r}). 이 값은 무시됩니다"]
-        problems = [
-            f"모르는 키 `skip.{key}.{sub}` 는 무시됩니다{_suggest(str(sub), TABLE_TEXT_LONG_TEXT_SUBKEYS)}"
-            for sub in value if str(sub) not in TABLE_TEXT_LONG_TEXT_SUBKEYS
-        ]
-        if "min_avg_chars" in value and not _is_nonneg_int(value["min_avg_chars"]):
-            problems.append(
-                f"`skip.{key}.min_avg_chars` 는 0 이상의 정수여야 합니다(받은 값: {value['min_avg_chars']!r}). 이 값은 무시됩니다"
-            )
-        return problems
-    if key == "long_cells":
+    if key in (TABLE_TEXT_LONG_TEXT_KEY, "long_cells"):
         if value is False or _is_nonneg_int(value):
             return []
         return [f"`skip.{key}` 는 0 이상의 정수여야 합니다(받은 값: {value!r}). 이 값은 무시됩니다"]
@@ -289,8 +274,6 @@ def diagnose_table_text_description(block) -> list[str]:
             if key in TABLE_TEXT_SKIP_OLD_KEYS:
                 news = TABLE_TEXT_SKIP_OLD_KEYS[key]
                 names = ", ".join(f"`skip.{new}`" for new in news)
-                if key == "long_cells":
-                    names = "`skip.long_text_table.min_avg_chars`"
                 problems.append(f"`skip.{key}` 는 옛 이름입니다. {names} 를 쓰십시오")
                 if any(new in skip for new in news):
                     problems.append(f"`skip.{key}` 와 새 키 {names} 를 함께 적었습니다. 새 키가 우선합니다")
